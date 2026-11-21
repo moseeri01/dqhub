@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_57"
+local VERSION = "dq_64"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -538,6 +538,31 @@ local function castReady(key)
     return v and v.Value <= 0
 end
 local function cast(key) local r = R("useSpell") if r then r:FireServer(key) end end
+-- backup spell slots (hotbar 1 / 2 = SpellSwap1 / SpellSwap2 -> UseBackup("Slot1"/"Slot2")). Test 11-21: does swapping
+-- a backup spell in give extra casts while Q / E cool down? While S.useSwap is on: Q cooling -> swap Slot1 + cast Q,
+-- E cooling -> swap Slot2 + cast E (each slot at most every 1.2 s). Cooldown values before/after are logged.
+local lastSwap = { Slot1 = 0, Slot2 = 0 }
+local function cdv(key) local v = LP:FindFirstChild("cooldown" .. key) return v and v.Value or -1 end
+local function trySwap()
+    if not S.useSwap then return end
+    local ub = R("UseBackup")
+    if not ub then return end
+    for slot, key in pairs({ Slot1 = "Q", Slot2 = "E" }) do
+        if cdv(key) > 0.3 and os.clock() - lastSwap[slot] > 1.2 then
+            lastSwap[slot] = os.clock()
+            local before = cdv(key)
+            ub:FireServer(slot)
+            task.delay(0.25, function()
+                local mid = cdv(key)
+                cast(key)
+                task.delay(0.25, function()
+                    S.swapN = (S.swapN or 0) + 1
+                    if S.swapN <= 12 then log(string.format("SWAP %s: cd%s %.1f -> after swap %.1f -> after cast %.1f", slot, key, before, mid, cdv(key))) end
+                end)
+            end)
+        end
+    end
+end
 
 -- way back to the lobby when the game's own ReturnLobby does nothing (dead in Calamity hardcore, 11-21)
 local TeleportService = game:GetService("TeleportService")
@@ -1419,6 +1444,7 @@ local function engage(e)
         if swingOn and cfg.autoQE then
             if castReady("Q") then cast("Q") end
             if castReady("E") then cast("E") end
+        trySwap()
         end
         S.target = "in the safe zone"
         return
@@ -1435,6 +1461,7 @@ local function engage(e)
             if swingOn and cfg.autoQE then
                 if castReady("Q") then cast("Q") end
                 if castReady("E") then cast("E") end
+        trySwap()
             end
             return
         end
@@ -1508,6 +1535,7 @@ local function engage(e)
     if swingOn and cfg.autoQE then
         if castReady("Q") then cast("Q") end
         if castReady("E") then cast("E") end
+        trySwap()
     end
 end
 
@@ -2151,6 +2179,161 @@ local function runCmd(line)
     elseif a == "lobby" then toLobby()
     elseif a == "jobs" then go("jobs", lobbyJobs)
     elseif a == "sell" then go("sell", sellNow)
+    elseif a == "slots" then
+        -- put spare spells into backup slots 1 / 2 (Blue Flames first, then spare Deadly Whirls); nothing is sold or dropped
+        go("slots", function()
+            local inv = R("getInventory"):InvokeServer(LP.UserId)
+            local spare = {}
+            for _, it in pairs(type(inv) == "table" and inv.spells or {}) do
+                if not it.equippedQ and not it.equippedE and not it.equipped then spare[#spare + 1] = it end
+            end
+            table.sort(spare, function(a, b) return (a.itemName == "Blue Flames" and 0 or 1) < (b.itemName == "Blue Flames" and 0 or 1) end)
+            for i, slot in ipairs({ "Slot1", "Slot2" }) do
+                local it = spare[i]
+                if it then
+                    local ok = R("equipSpell"):InvokeServer(it.GUID, it.itemName, slot)
+                    log("SLOTS " .. slot .. " <- " .. tostring(it.itemName) .. " -> " .. tostring(ok))
+                    task.wait(0.5)
+                end
+            end
+        end)
+    elseif a == "fftest" then
+        -- does ApplyForcefield (sent by the game during a Flashstep jump) give a shield without a jump?
+        go("fftest", function()
+            local c = char()
+            local function ffs() local n = 0 for _, d in ipairs(c and c:GetChildren() or {}) do if d:IsA("ForceField") then n = n + 1 end end return n end
+            local attrs = function() local t = {} for k, v in pairs(c and c:GetAttributes() or {}) do t[#t + 1] = k .. "=" .. tostring(v) end return table.concat(t, " ") end
+            log("FFTEST before: forcefields " .. ffs() .. " | char attrs " .. attrs())
+            R("ApplyForcefield"):FireServer()
+            for i = 1, 6 do task.wait(0.5) log(string.format("FFTEST +%.1fs: forcefields %d | char attrs %s", i * 0.5, ffs(), attrs())) end
+        end)
+    elseif a == "dumpsrc" then
+        -- decompile the client scripts here (read only, nothing runs or is sent); keep the ones that mention the
+        -- dungeon remotes we want to understand -> dq/dsrc_<place>/
+        go("dumpsrc", function()
+            if type(decompile) ~= "function" then log("DUMPSRC no decompile") return end
+            local want = { "ClientDamage", "EnemyAttack", "EnemyRemote", "TakeDamage", "SendSellNPC", "touchOrb", "LegacyTokenFound",
+                "SecretDropShown", "Forcefield", "SpawnCompanion", "ContinueInf", "NextTier", "kaboomEvent", "FlashstepState",
+                "UpdateKeys", "SendRune", "DropItem", "lootDropTest", "PerformanceReport", "NextRoom", "SwapCanSpawn", "Modifier" }
+            local dir = DIR .. "/dsrc_" .. tostring(game.PlaceId)
+            pcall(function() if not isfolder(dir) then makefolder(dir) end end)
+            local list, seen = {}, {}
+            local function add(d) if typeof(d) == "Instance" and not seen[d] and (d:IsA("LocalScript") or d:IsA("ModuleScript")) then seen[d] = true list[#list + 1] = d end end
+            for _, root in ipairs({ RS, game:GetService("ReplicatedFirst"), LP, workspace, game:GetService("StarterPlayer"), game:GetService("StarterGui") }) do
+                pcall(function() for _, d in ipairs(root:GetDescendants()) do add(d) end end)
+            end
+            for _, fname in ipairs({ "getscripts", "getloadedmodules", "getnilinstances" }) do
+                local fn = G[fname] or getfenv(0)[fname]
+                if type(fn) == "function" then pcall(function() for _, d in ipairs(fn()) do add(d) end end) end
+            end
+            log("DUMPSRC " .. #list .. " scripts to read")
+            local index, kept = {}, 0
+            for i, s in ipairs(list) do
+                if not F.alive then break end
+                local ok, src = pcall(decompile, s)
+                if ok and type(src) == "string" then
+                    local hits = {}
+                    for _, w in ipairs(want) do if src:find(w, 1, true) then hits[#hits + 1] = w end end
+                    if #hits > 0 then
+                        kept = kept + 1
+                        local file = string.format("%04d_%s.lua", i, (s.Name:gsub("[^%w_%-]", "_")):sub(1, 40))
+                        pcall(function() writefile(dir .. "/" .. file, "-- " .. s:GetFullName() .. "\n" .. src) end)
+                        index[#index + 1] = file .. " | " .. table.concat(hits, ",") .. " | " .. s:GetFullName()
+                    end
+                end
+                if i % 4 == 0 then task.wait() end
+            end
+            pcall(function() writefile(dir .. "/_index.txt", table.concat(index, "\n")) end)
+            log("DUMPSRC done: " .. kept .. " scripts mention them -> " .. dir)
+        end)
+    elseif a == "hptest" then
+        -- set a mob's hp to 0 / delete it on our side: does the server count it as dead (remainingEnemies, Death effect)?
+        go("hptest", function()
+            local en = workspace:FindFirstChild("Enemies")
+            local rem = en and en:FindFirstChild("remainingEnemies")
+            local list = enemies()
+            if #list < 2 then log("HPTEST need 2 mobs") return end
+            local a, b = list[1], list[2]
+            local r0 = rem and rem.Value or -1
+            pcall(function() a.h.Health = 0 end)
+            task.wait(1.5)
+            log(string.format("HPTEST hp->0 on %s: our copy hp %.0f, model still there %s, remainingEnemies %d -> %d", a.m.Name, a.h.Health, tostring(a.m.Parent ~= nil), r0, rem and rem.Value or -1))
+            local r1 = rem and rem.Value or -1
+            local name = b.m.Name
+            pcall(function() b.m:Destroy() end)
+            task.wait(2)
+            log(string.format("HPTEST deleted %s on our side: remainingEnemies %d -> %d", name, r1, rem and rem.Value or -1))
+        end)
+    elseif a == "owntest" then
+        -- can our client move mobs (network ownership)? Lift the 3 nearest mobs 25 studs on our side and see if they stay
+        -- (server-owned parts snap back within a few frames). Also asks the executor's isnetworkowner if it has one.
+        go("owntest", function()
+            local r = hrp()
+            if not r then return end
+            local list = enemies()
+            table.sort(list, function(x, y) return (x.r.Position - r.Position).Magnitude < (y.r.Position - r.Position).Magnitude end)
+            for i = 1, math.min(3, #list) do
+                local e = list[i]
+                local p0 = e.r.Position
+                local own = "n/a"
+                pcall(function() if isnetworkowner then own = tostring(isnetworkowner(e.r)) end end)
+                local anch = tostring(e.r.Anchored)
+                pcall(function() e.r.CFrame = e.r.CFrame + Vector3.new(0, 25, 0) end)
+                task.wait(0.6)
+                local dy = e.r.Position.Y - p0.Y
+                log(string.format("OWNTEST %s: isnetworkowner=%s anchored=%s, lifted 25 -> after 0.6 s still +%.0f (%s)", e.m.Name, own, anch, dy,
+                    dy > 15 and "WE MOVE IT" or "server put it back"))
+            end
+        end)
+    elseif a == "boxtest" then
+        -- owner 11-21: "make the swing box bigger?" The box (Workspace.SwingHitboxAgony) is made by the server.
+        -- Stand 35 studs from a mob (out of reach) and swing 5 s as is, then 5 s while every new box is grown to 120
+        -- and moved onto the mob on our side. Damage in the 2nd window = the server trusts the client's box.
+        go("boxtest", function()
+            local was = cfg.farm
+            cfg.farm = false S.limitBusy = true swingOn = false hold = nil
+            local dd = function() local p = LP:FindFirstChild("dungPerformance") local v = p and p:FindFirstChild("damageDone") return v and v.Value or 0 end
+            local e = pickTarget()
+            if not e then log("BOXTEST no mob") S.limitBusy = false cfg.farm = was return end
+            local function stand()
+                local r = hrp()
+                if not r or not e.r.Parent then return end
+                local dir = flat(r.Position) - flat(e.r.Position)
+                if dir.Magnitude < 0.1 then dir = Vector3.new(1, 0, 0) end
+                local p = e.r.Position + dir.Unit * (math.max(e.r.Size.X, e.r.Size.Z) / 2 + 40) -- 40 studs past its body
+                setCF(CFrame.lookAt(p, e.r.Position))
+            end
+            local grow = false
+            local conn = workspace.ChildAdded:Connect(function(o)
+                if grow and o.Name == "SwingHitboxAgony" and o:IsA("BasePart") then
+                    pcall(function() o.Size = Vector3.new(120, 120, 120) o.CFrame = e.r.CFrame end)
+                end
+            end)
+            local function window()
+                local a0 = dd()
+                local t0 = os.clock()
+                while os.clock() - t0 < 5 and e.h.Health > 0 do stand() attack() task.wait(0.1) end
+                return dd() - a0
+            end
+            local normal = window()
+            grow = true
+            local big = window()
+            grow = false
+            conn:Disconnect()
+            log(string.format("BOXTEST 40 studs past the body: normal box %.0f dmg, grown box %.0f dmg (%s)", normal, big, e.m.Name))
+            S.limitBusy = false cfg.farm = was
+        end)
+    elseif a == "swaptest" then
+        -- 25 s normal, 25 s with swapping, same fight; damage done by us in each window
+        go("swaptest", function()
+            local dd = function() local p = LP:FindFirstChild("dungPerformance") local v = p and p:FindFirstChild("damageDone") return v and v.Value or 0 end
+            S.useSwap = false
+            local a0 = dd() task.wait(25) local a1 = dd()
+            S.useSwap = true S.swapN = 0
+            local b0 = dd() task.wait(25) local b1 = dd()
+            S.useSwap = false
+            log(string.format("SWAPTEST normal %.0f dmg/s | with swap %.0f dmg/s (%d swaps)", (a1 - a0) / 25, (b1 - b0) / 25, S.swapN or 0))
+        end)
     elseif a == "inv" then
         go("inv", function()
             local s = invSnap()

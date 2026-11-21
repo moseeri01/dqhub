@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_69"
+local VERSION = "dq_79"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -71,7 +71,7 @@ local DEFAULT = {
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
     autoBest = true, retry = true, dodge = false, dodgeLight = true, -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
-    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
+    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
 }
 local cfg = {}
@@ -502,7 +502,8 @@ local MSafe = (function()
 local M = {}
 M.cfg = {
     enabled = true, name = "moseeri", stuckMin = 3, pullbackMax = 10, errorMax = 50, staffCheck = true, groupId = nil,
-    staffWords = { "mod", "admin", "dev", "owner", "staff", "manager", "tester", "helper", "creator" },
+    -- whole words only ("dev" must not hit "Devoted", "mod" not "Model"); no "creator" (content creators are fans)
+    staffWords = { "mod", "mods", "moderator", "admin", "administrator", "dev", "developer", "owner", "co-owner", "staff", "manager", "tester" },
     file = "msafe_state.json",
 }
 M.active = false
@@ -528,6 +529,7 @@ local function countSince(list, secs)
 end
 
 function M.kick(code, reason)
+    if not M.running then return end
     local msg = string.format("%s: please rejoin for safety [%s] %s", M.cfg.name, code, reason or "")
     local st = readState()
     st.lastKick = { code = code, reason = reason, at = os.date("%Y-%m-%d %H:%M:%S"), t = os.time(), hub = M.cfg.name }
@@ -537,6 +539,8 @@ function M.kick(code, reason)
     task.wait(0.5)
     pcall(function() game:GetService("Players").LocalPlayer:Kick(msg) end)
 end
+-- the hub calls this when it shuts down (reload / second copy): the watcher must not outlive it
+function M.stop() M.running = false M.active = false end
 function M.progress() lastProgress = os.clock() end
 -- at most one pull-back per 0.5 s: a hub that reports every frame must not trip S02 (dq 11-21: 686 in 60 s)
 function M.pullback()
@@ -575,8 +579,10 @@ function M.start(opts)
             local ok, role = pcall(function() return p:GetRoleInGroup(M.cfg.groupId) end)
             if not (ok and type(role) == "string") or not (M.cfg.enabled and M.cfg.staffCheck and M.running) then return end
             local r = role:lower()
-            for _, w in ipairs(M.cfg.staffWords) do
-                if r:find(w, 1, true) then M.kick("S03", "staff in server: " .. p.Name .. " (" .. role .. ")") return end
+            for word in r:gmatch("[%a%-]+") do
+                for _, w in ipairs(M.cfg.staffWords) do
+                    if word == w then M.kick("S03", "staff in server: " .. p.Name .. " (" .. role .. ")") return end
+                end
             end
         end)
     end
@@ -620,6 +626,22 @@ end)()
 -- game access
 --------------------------------------------------------------------------------
 local function R(name) return RS:FindFirstChild(name) end
+-- ask the server with a time limit: a RemoteFunction that never answers used to freeze the lobby jobs (11-21 16:25)
+local function ask(name, ...)
+    local rem = RS:FindFirstChild(name)
+    if not rem then return nil end
+    local args = table.pack(...)
+    local done, res = false, nil
+    task.spawn(function()
+        local ok, r = pcall(function() return rem:InvokeServer(table.unpack(args, 1, args.n)) end)
+        res = ok and r or nil
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < 6 do task.wait(0.1) end
+    if not done then log("SLOW " .. name .. ": no answer in 6 s, moving on") end
+    return res
+end
 local function char() return LP.Character end
 local function hrp() local c = char() return c and c:FindFirstChild("HumanoidRootPart") end
 local function hum() local c = char() return c and c:FindFirstChildOfClass("Humanoid") end
@@ -960,6 +982,7 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     -- (a gap here is our own hold fighting our own moves, not the server: never counted - it set off a false
     -- safety kick [S02] "686 pull-backs in 60 s" on 11-21 16:13)
     if S.movingUntil and os.clock() < S.movingUntil then return end
+    lastSet = nil -- this move is ours (review 11-21: a dodge followed by a hold on another spot looked like a pull-back)
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = hold.cf
 end)
@@ -1692,6 +1715,21 @@ local function coins() local d = LP:FindFirstChild("data") return d and num(d:Fi
 local sessionStart = os.clock()
 local sessionCoins0 = coins()
 
+-- why did a run end up in the lobby? (owner 11-21: "Retry goes back to the lobby") - log the game's own
+-- run-end signals: a failed run, a host change, votes, and the server sending us back
+do
+    for _, n in ipairs({ "DungeonFail", "TransferHost", "voteRemote", "ReturnLobby", "ForceSpectate", "DisplayLoading" }) do
+        local rem = R(n)
+        if rem and rem:IsA("RemoteEvent") then
+            F.conns[#F.conns + 1] = rem.OnClientEvent:Connect(function(...)
+                local parts = {}
+                for i, v in ipairs({ ... }) do if i <= 4 then parts[#parts + 1] = tostring(v):sub(1, 40) end end
+                log("RUN-END signal " .. n .. "(" .. table.concat(parts, ", ") .. ")")
+            end)
+        end
+    end
+end
+
 do
     local sr = R("SendRewards")
     if sr then
@@ -1920,7 +1958,7 @@ local sellInfo = { matches = "-", last = "-" }
 local function sellList()
     local gi = R("getInventory")
     if not gi then return nil, 0 end
-    local inv = gi:InvokeServer(LP.UserId)
+    local inv = ask("getInventory", LP.UserId)
     local list, n = { weapons = {}, armors = {}, helmets = {}, legs = {}, spells = {}, rings = {}, sigils = {} }, 0
     for _, ty in ipairs(TYPES) do
         if cfg.sellTypes[ty] and type(inv) == "table" and type(inv[ty]) == "table" then
@@ -1940,7 +1978,7 @@ end
 local function countSell() local _, n = sellList() sellInfo.matches = tostring(n) .. " items" return n end
 -- inventory snapshot: item count + which GUIDs are worn (to check that equip / sell really did something)
 local function invSnap()
-    local inv = R("getInventory") and R("getInventory"):InvokeServer(LP.UserId)
+    local inv = R("getInventory") and ask("getInventory", LP.UserId)
     local n, eq = 0, {}
     for _, ty in ipairs(TYPES) do
         if type(inv) == "table" and type(inv[ty]) == "table" then
@@ -1957,7 +1995,7 @@ local function sellNow()
     local list, n = sellList()
     if not list or n == 0 then sellInfo.matches = "0 items" log("SELL nothing to sell") return end
     local before = invSnap()
-    local ok = R("sellItems"):InvokeServer(list)
+    local ok = ask("sellItems", list)
     task.wait(1)
     local after = invSnap()
     -- one big call came back nil in a dungeon (11-21 13:33, 63 items): if nothing went, try one item type at a time
@@ -1967,7 +2005,7 @@ local function sellNow()
             if #list[ty] > 0 then
                 local one = { weapons = {}, armors = {}, helmets = {}, legs = {}, spells = {}, rings = {}, sigils = {} }
                 one[ty] = list[ty]
-                local r = R("sellItems"):InvokeServer(one)
+                local r = ask("sellItems", one)
                 log("SELL " .. ty .. " x" .. #list[ty] .. " -> " .. tostring(r))
                 task.wait(0.5)
             end
@@ -2019,14 +2057,14 @@ local function lobbyJobs()
         end
     end
     if cfg.autoQuests and R("getPlayerQuests") and R("CompleteQuest") then
-        local q = R("getPlayerQuests"):InvokeServer()
+        local q = ask("getPlayerQuests")
         local cur = type(q) == "table" and q.NewCurrentQuests
         for _, kind in ipairs({ "Daily", "Weekly", "Battlepass" }) do
             local set = cur and cur[kind] and cur[kind].Quests
             if type(set) == "table" then
                 for key, v in pairs(set) do
                     if type(v) == "table" and not v.Claimed and tonumber(v.Amount) and tonumber(v.Progress) and v.Progress >= v.Amount then
-                        local ok = R("CompleteQuest"):InvokeServer(kind, key)
+                        local ok = ask("CompleteQuest", kind, key)
                         log("QUEST " .. kind .. " " .. tostring(v.Description or key) .. " -> " .. tostring(ok))
                         task.wait(0.5)
                     end
@@ -2034,7 +2072,89 @@ local function lobbyJobs()
             end
         end
     end
+    -- upgrade worn gear one level at a time (coins); the server refuses when we cannot pay or it is maxed.
+    -- Same rule as the game's upgrade screen for which stat goes up. Spells / sigils cannot be upgraded.
+    if cfg.autoUpgrade then
+        pcall(function()
+            local inv = ask("getInventory", LP.UserId)
+            local done = 0
+            for _, ty in ipairs({ "weapons", "armors", "helmets", "legs", "rings" }) do if cfg.upgSlots[ty] then
+                for _, it in pairs(type(inv) == "table" and inv[ty] or {}) do
+                    if it.equipped == true and (tonumber(it.currentUpgrade) or 0) < (tonumber(it.maxUpgrades) or 0) then
+                        local stat = (tostring(it.itemName):find("Guardian") and "health") or ((tonumber(it.spellPower) or 0) < (tonumber(it.physicalPower) or 0) and "physical" or "spell")
+                        for _ = 1, math.max(1, tonumber(cfg.upgLevels) or 5) do
+                            local r = ask("upgradeItem", it.GUID, 1, stat, ty)
+                            if r == false or r == nil then break end
+                            done = done + 1
+                            task.wait(0.3)
+                        end
+                    end
+                end
+            end end
+            log("UPGRADE worn gear: " .. done .. " level(s) bought" .. (IN_LOBBY and "" or " (in a dungeon)"))
+        end)
+    end
+    -- free rewards the game hands out (same calls as their claim buttons; the server says no when nothing is due).
+    -- Lobby only, once per lobby visit. Nothing here costs anything (Robux / gem buys are never called).
+    if cfg.autoFree and IN_LOBBY then
+        local got = {}
+        local function try(name, fn) local ok, r = pcall(fn) if ok and r ~= nil and r ~= false then got[#got + 1] = name end end
+        try("offline", function() R("ClaimOffline"):FireServer() end)
+        try("streak", function() R("ClaimStreakReward"):FireServer() end)
+        try("enemy index", function() return ask("ClaimIndexEnemy") end)
+        try("rng index", function() return ask("ClaimIndexRNG") end)
+        for n = 1, 12 do try("playtime " .. n, function() return ask("ClaimPlaytimeReward", n) end) end
+        pcall(function()
+            local rewards = require(RS.Modules.LevelRewards)
+            local lvl = myLevel()
+            for key in pairs(rewards) do
+                if tonumber(key) and tonumber(key) <= lvl then R("ClaimLevelMilestone"):FireServer(key) task.wait(0.2) end
+            end
+        end)
+        log("FREE rewards tried (offline, streak, index, playtime 1-12, level milestones)" .. (#got > 0 and (" - yes: " .. table.concat(got, ", ")) or ""))
+    end
 end
+
+-- game settings the owner can switch from the window (sent only when the game's value differs)
+local function gameSetting(remoteKey, settingName, want)
+    pcall(function()
+        local v = LP:FindFirstChild("Settings") and LP.Settings:FindFirstChild(settingName)
+        if v and v.Value ~= want then
+            R("ChangeSetting"):FireServer(remoteKey)
+            log("GAME SETTING " .. settingName .. " -> " .. tostring(want))
+        end
+    end)
+end
+local function applyGameSettings()
+    gameSetting("lowGraphicsMode", "LowGraphicsMode", cfg.lowGfx == true)
+end
+task.delay(5, applyGameSettings)
+
+-- sell NPC: some dungeons get a seller (Workspace.SellNPC, sent with SendSellNPC); selling works next to it.
+-- With Auto sell on and the bag at the limit: go to it, sell with the filter, carry on.
+go("sellnpc", function()
+    while F.alive do
+        task.wait(20)
+        if not IN_LOBBY and cfg.farm and cfg.autoSell and not S.limitBusy then
+            local npc = workspace:FindFirstChild("SellNPC")
+            local root = npc and (npc:FindFirstChild("HumanoidRootPart") or npc:FindFirstChildWhichIsA("BasePart", true))
+            if root then
+                local ok, snap = pcall(invSnap)
+                if ok and snap.n >= (tonumber(cfg.sellAt) or 80) then
+                    log("SELL NPC found - selling " .. snap.n .. " items there")
+                    S.limitBusy = true
+                    pcall(function()
+                        moveTo(root.Position + Vector3.new(0, 3, 4), root.Position)
+                        task.wait(0.8)
+                        sellNow()
+                        S.needSell = false
+                    end)
+                    S.limitBusy = false
+                end
+            end
+        end
+    end
+end)
 
 S.jobs = lobbyJobs -- the end screen in the dungeon calls it too
 local jobsDone = false
@@ -2164,15 +2284,17 @@ end
 local Safe = MSafe.start({ name = "moseeri dungeon", onLog = log, onStuck = function() toLobby() end,
     stuckMin = tonumber(cfg.stuckMin) or 3,
     pullbackMax = 25, -- our own hover / hold corrections show up as pull-backs too (about 1 a minute), so higher than default
-    enabled = cfg.watchdog ~= false })
+    enabled = true })
 do
     local function ddv() local p = LP:FindFirstChild("dungPerformance") local v = p and p:FindFirstChild("damageDone") return v and v.Value or 0 end
     local lastDD, lastPhase = ddv(), S.phase
     go("safety", function()
         while F.alive do
             task.wait(2)
-            Safe.cfg.enabled = cfg.watchdog ~= false
-            Safe.active = cfg.farm and (not IN_LOBBY or cfg.autoJoin) and not S.limitBusy and not cfg.recordRoute
+            Safe.cfg.enabled = true -- always on (owner 11-21: no switch)
+            local h = hum()
+            local dead = not h or h.Health <= 0 or S.phase == "dead"
+            Safe.active = cfg.farm and (not IN_LOBBY or cfg.autoJoin) and not S.limitBusy and not cfg.recordRoute and not dead
             local dd = ddv()
             if dd ~= lastDD or (S.phase ~= lastPhase and (S.phase == "start" or S.phase == "end")) then Safe.progress() end
             lastDD, lastPhase = dd, S.phase
@@ -2351,7 +2473,7 @@ local function runCmd(line)
     elseif a == "slots" then
         -- put spare spells into backup slots 1 / 2 (Blue Flames first, then spare Deadly Whirls); nothing is sold or dropped
         go("slots", function()
-            local inv = R("getInventory"):InvokeServer(LP.UserId)
+            local inv = ask("getInventory", LP.UserId)
             local spare = {}
             for _, it in pairs(type(inv) == "table" and inv.spells or {}) do
                 if not it.equippedQ and not it.equippedE and not it.equipped then spare[#spare + 1] = it end
@@ -2360,7 +2482,7 @@ local function runCmd(line)
             for i, slot in ipairs({ "Slot1", "Slot2" }) do
                 local it = spare[i]
                 if it then
-                    local ok = R("equipSpell"):InvokeServer(it.GUID, it.itemName, slot)
+                    local ok = ask("equipSpell", it.GUID, it.itemName, slot)
                     log("SLOTS " .. slot .. " <- " .. tostring(it.itemName) .. " -> " .. tostring(ok))
                     task.wait(0.5)
                 end
@@ -2641,7 +2763,6 @@ local farmP = UI.page("Farm", 1)
 local fc = UI.card(farmP, 1, "Dungeon")
 UI.toggle(fc, "Auto farm (fight in dungeons)", get("farm"), set("farm"))
 UI.toggle(fc, "Retry after clear (off = lobby)", get("retry"), set("retry"))
-UI.toggle(fc, "Safety kick (stuck / staff / pull-backs)", get("watchdog"), set("watchdog"))
 UI.toggle(fc, "Hardcore", get("hardcore"), set("hardcore"))
 UI.info(fc, "Now", function() return S.phase .. " · " .. tostring(S.target) end)
 
@@ -2713,30 +2834,8 @@ UI.toggle(pk, "Record route (play 1 run by hand)", get("recordRoute"), function(
 end)
 UI.info(pk, "Recording", function() return rec.pts and (rec.key .. " · " .. #rec.pts .. " points") or (cfg.recordRoute and "starts in the dungeon" or "-") end)
 
+-- Lobby tab (owner 11-21: one card per topic, short labels so nothing is cut, no "run now" button - it all runs by itself)
 local lobP = UI.page("Lobby", 2)
-local lj = UI.card(lobP, 1, "In the lobby")
-UI.toggle(lj, "Skill points (all into one)", get("autoSP"), set("autoSP"))
-UI.choice(lj, "Skill point stat", { "physical", "spell", "health" }, get("spStat"), set("spStat"))
-UI.toggle(lj, "Equip best", get("autoEquipBest"), set("autoEquipBest"))
-UI.toggle(lj, "Daily reward", get("autoDaily"), set("autoDaily"))
-UI.toggle(lj, "Claim finished quests", get("autoQuests"), set("autoQuests"))
-UI.button(lj, "Run lobby jobs now", "Run", function() lobbyJobs() end)
-local sn = UI.card(lobP, 2, "Sell")
-UI.toggle(sn, "Auto sell (in the lobby)", get("autoSell"), set("autoSell"))
-UI.stepper(sn, "Go to lobby to sell at (items)", 30, 200, get("sellAt"), set("sellAt"), 10)
-UI.button(sn, "Matches now", "Count", function() countSell() end)
-UI.info(sn, "Would sell", function() return sellInfo.matches end)
-UI.button(sn, "Sell now", "Sell", function() sellNow() end)
-UI.info(sn, "Last sell", function() return sellInfo.last end)
-local sc = UI.card(lobP, 2, "What to sell")
--- dropdowns instead of pill rows (owner 11-21: shorter, less lag); tap an entry to switch it, the list stays open
-local function pickList(tbl, names)
-    return function()
-        local out = {}
-        for _, o in ipairs(names) do out[#out + 1] = { key = o, text = o, right = tbl()[o] and "sell" or "keep" } end
-        return out
-    end
-end
 local function pickSummary(tbl, names)
     return function()
         local on = {}
@@ -2744,16 +2843,58 @@ local function pickSummary(tbl, names)
         return #on == 0 and "nothing" or (#on == #names and "all" or table.concat(on, ", "))
     end
 end
+local function pickList(tbl, names, onWord, offWord)
+    return function()
+        local out = {}
+        for _, o in ipairs(names) do out[#out + 1] = { key = o, text = o, right = tbl()[o] and onWord or offWord } end
+        return out
+    end
+end
+
+-- left column
+local cc = UI.card(lobP, 1, "Character")
+UI.toggle(cc, "Spend skill points", get("autoSP"), set("autoSP"))
+UI.choice(cc, "Stat", { "physical", "spell", "health" }, get("spStat"), set("spStat"))
+UI.toggle(cc, "Equip best", get("autoEquipBest"), set("autoEquipBest"))
+
+local rw = UI.card(lobP, 1, "Rewards")
+UI.toggle(rw, "Daily reward", get("autoDaily"), set("autoDaily"))
+UI.toggle(rw, "Finished quests", get("autoQuests"), set("autoQuests"))
+UI.toggle(rw, "Free rewards", get("autoFree"), set("autoFree"))
+UI.note(rw, "Free rewards = offline, login streak, playtime, level milestones, index.")
+
+local up = UI.card(lobP, 1, "Upgrade gear")
+UI.toggle(up, "Upgrade worn gear (coins)", get("autoUpgrade"), set("autoUpgrade"))
+local UPG_LIST = { "weapons", "armors", "helmets", "legs", "rings" }
+local upgT = function() return cfg.upgSlots end
+UI.dropdown(up, "Slots", 150, pickList(upgT, UPG_LIST, "upgrade", "skip"), pickSummary(upgT, UPG_LIST),
+    function(o) cfg.upgSlots[o] = not cfg.upgSlots[o] or nil saveCfg() end,
+    { isOn = function(o) return cfg.upgSlots[o] == true end, summary = pickSummary(upgT, UPG_LIST) })
+UI.stepper(up, "Levels per item each time", 1, 30, get("upgLevels"), set("upgLevels"), 1)
+
+-- right column
+local sn = UI.card(lobP, 2, "Sell")
+UI.toggle(sn, "Auto sell", get("autoSell"), set("autoSell"))
+UI.stepper(sn, "Go to lobby at (items)", 30, 200, get("sellAt"), set("sellAt"), 10)
+-- what to sell sits in the same card (owner 11-21: less confusing)
 local RAR_LIST = { "common", "uncommon", "rare", "epic", "legendary", "heirloom" }
 local rarT = function() return cfg.sellRarity end
 local typT = function() return cfg.sellTypes end
-UI.dropdown(sc, "Rarity", 130, pickList(rarT, RAR_LIST), pickSummary(rarT, RAR_LIST),
+UI.dropdown(sn, "Rarity", 130, pickList(rarT, RAR_LIST, "sell", "keep"), pickSummary(rarT, RAR_LIST),
     function(o) cfg.sellRarity[o] = not cfg.sellRarity[o] or nil saveCfg() end,
     { isOn = function(o) return cfg.sellRarity[o] == true end, summary = pickSummary(rarT, RAR_LIST) })
-UI.dropdown(sc, "Item types", 150, pickList(typT, TYPES), pickSummary(typT, TYPES),
+UI.dropdown(sn, "Types", 150, pickList(typT, TYPES, "sell", "keep"), pickSummary(typT, TYPES),
     function(o) cfg.sellTypes[o] = not cfg.sellTypes[o] or nil saveCfg() end,
     { isOn = function(o) return cfg.sellTypes[o] == true end, summary = pickSummary(typT, TYPES) })
-UI.note(sc, "Never sells locked or equipped items.")
+UI.note(sn, "Never sells locked or equipped items.")
+UI.button(sn, "Matches now", "Count", function() countSell() end)
+UI.info(sn, "Would sell", function() return sellInfo.matches end)
+UI.button(sn, "Sell now", "Sell", function() sellNow() end)
+UI.info(sn, "Last sell", function() return sellInfo.last end)
+
+
+local gs = UI.card(lobP, 2, "Game settings")
+UI.toggle(gs, "Low graphics (phones)", get("lowGfx"), function(v) cfg.lowGfx = v saveCfg() applyGameSettings() end)
 
 local limP = UI.page("Limit test", 3)
 local lc = UI.card(limP, 1, "Find the limits")
@@ -2803,6 +2944,9 @@ end)
 
 local function stopMe()
     F.alive = false
+    -- stop this copy's safety watcher too: an orphaned one counted "no progress" and kicked [S01] / sent us to
+    -- the lobby after every reload (11-21 16:45)
+    pcall(function() Safe.stop() end)
     swingOn = false
     for _, c in ipairs(F.conns) do pcall(function() c:Disconnect() end) end
     pcall(function() gui:Destroy() end)

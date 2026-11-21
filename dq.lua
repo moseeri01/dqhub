@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_95"
+local VERSION = "dq_96"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1604,6 +1604,26 @@ local function heightTick(e)
     end
     HT.t0, HT.dd0 = now, ddNow()
 end
+-- party sides (owner 11-21: "split them to different sides"): with other players in the dungeon each bot keeps
+-- its own side of the mob, by its place in the sorted user ids (2 bots = opposite sides). nil when alone.
+local sectorCache = { t = 0, v = nil }
+local function mySector()
+    if IN_LOBBY then return nil end
+    if os.clock() - sectorCache.t < 2 then return sectorCache.v end
+    local ids = {}
+    for _, pl in ipairs(Players:GetPlayers()) do ids[#ids + 1] = pl.UserId end
+    local v = nil
+    if #ids > 1 then
+        table.sort(ids)
+        local idx = 1
+        for i, id in ipairs(ids) do if id == LP.UserId then idx = i end end
+        local a = (idx - 1) * 2 * math.pi / #ids
+        v = Vector3.new(math.cos(a), 0, math.sin(a))
+    end
+    sectorCache.t, sectorCache.v = os.clock(), v
+    return v
+end
+S.mySector = mySector
 local function cellPos(root, ai, ri, hi)
     local look = flat(root.CFrame.LookVector)
     if look.Magnitude < 0.1 then look = Vector3.new(0, 0, -1) end
@@ -1641,6 +1661,11 @@ local function bossSpot(e)
         local p = cellPos(e.r, ai, ri, hi)
         if ((okSpot(p) or not cfg.dodge) and not crowded(p)) and not (leave and cur.key == key) then
             local score = ((st.h or 0) + 0.5) / ((st.s or 0) + 3) + CELL_R[ri] * 0.002 + math.min(3, st.nd or 0) * 0.3
+            local sec = mySector()
+            if sec then
+                local v = flat(p - e.r.Position)
+                if v.Magnitude > 0.1 then score = score + (1 - v.Unit:Dot(sec)) * 0.4 end -- 0 on our side, 0.8 on the far side
+            end
             if not bestScore or score < bestScore then best, bestScore = { ai = ai, ri = ri, hi = hi, key = key, stat = st }, score end
         end
     end end end
@@ -1748,6 +1773,8 @@ local function engage(e)
     if hover > 0 then
         -- just behind the mob's centre and above its head; the swing hitbox (16 x 50 x 22) reaches down
         stand = tp + dir.Unit * 2 + Vector3.new(0, hover, 0)
+        local sec = mySector()
+        if sec then stand = tp + sec * 4 + Vector3.new(0, hover, 0) end
         -- another player (bot) already over this mob: take the other side, further out
         if crowded(stand) then
             for _, deg in ipairs({ 180, 90, 270, 45, 135, 225, 315 }) do
@@ -2459,24 +2486,18 @@ local function onKick(msg)
         end)
 end
 S.onKick = onKick
--- evidence for the 2-bot kick (11-21): can two players physically push each other here?
+-- evidence for the 2-bot kick (11-21): can two players physically push each other here? (every field on its own pcall)
 if DEV then task.spawn(function()
     task.wait(3)
-    pcall(function()
-        local PS = game:GetService("PhysicsService")
-        local r = hrp()
-        local g = r and r.CollisionGroup or "?"
-        local others = {}
-        for _, pl in ipairs(Players:GetPlayers()) do
-            if pl ~= LP and pl.Character and pl.Character:FindFirstChild("HumanoidRootPart") then
-                local og = pl.Character.HumanoidRootPart.CollisionGroup
-                others[#others + 1] = pl.Name .. ":" .. og .. " collides=" .. tostring(PS:CollisionGroupsAreCollidable(g, og)) .. " canCollide=" .. tostring(pl.Character.HumanoidRootPart.CanCollide)
-            end
-        end
-        local torso = r and r.Parent and (r.Parent:FindFirstChild("UpperTorso") or r.Parent:FindFirstChild("Torso"))
-        log("COLLCHECK me " .. g .. " self-collide=" .. tostring(PS:CollisionGroupsAreCollidable(g, g)) .. " hrpCanCollide=" .. tostring(r and r.CanCollide)
-            .. " torso " .. (torso and (torso.CollisionGroup .. " canCollide=" .. tostring(torso.CanCollide)) or "-") .. " | others: " .. table.concat(others, ", "))
-    end)
+    local function q(fn) local ok, v = pcall(fn) return ok and tostring(v) or ("err " .. tostring(v):sub(1, 60)) end
+    local PS = game:GetService("PhysicsService")
+    local r = hrp()
+    local g = q(function() return r.CollisionGroup end)
+    local parts = {}
+    for _, d in ipairs(r and r.Parent and r.Parent:GetChildren() or {}) do
+        if d:IsA("BasePart") then parts[#parts + 1] = d.Name .. "=" .. q(function() return d.CanCollide end) .. "/" .. q(function() return d.CollisionGroup end) end
+    end
+    log("COLLCHECK group " .. g .. " self " .. q(function() return PS:CollisionGroupsAreCollidable(g, g) end) .. " | parts " .. table.concat(parts, " "))
 end) end -- dev command "kicktest" posts a test report
 pcall(function() F.conns[#F.conns + 1] = game:GetService("GuiService").ErrorMessageChanged:Connect(onKick) end)
 -- fetch the Discord address early: after a kick the game may be too far gone to fetch it

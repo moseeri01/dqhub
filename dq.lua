@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_66"
+local VERSION = "dq_68"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -71,7 +71,7 @@ local DEFAULT = {
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
     autoBest = true, retry = true, dodge = false, dodgeLight = true, -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
-    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
+    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
 }
 local cfg = {}
@@ -482,6 +482,130 @@ do
     end
 end
 
+local MSafe = (function()
+-- msafe: shared "safety kick" for the moseeri hubs (dq, aa, gpo, nexus). 2026-11-21.
+-- The hub tells msafe what is going on; msafe decides when to leave and kicks with
+--   "<name>: please rejoin for safety [Sxx] <reason>"
+-- Codes:
+--   S01 stuck      : hub is active and reported no progress for cfg.stuckMin minutes. First time -> hub's onStuck
+--                    (e.g. back to the lobby); again within 10 minutes (kept across servers) -> kick.
+--   S02 pull-backs : more than cfg.pullbackMax server position corrections in 60 s (the hub reports them).
+--   S03 staff      : a player whose role in the game's group (or cfg.groupId) contains a staff word joins.
+--   S04 errors     : more than cfg.errorMax script errors in 5 minutes (the hub reports them).
+-- Usage (hub):
+--   local Safe = MSafe.start({ name = "moseeri dungeon", onLog = log, onStuck = function() ... end })
+--   Safe.active = true / false      -- farming right now?
+--   Safe.progress()                 -- something moved forward (damage, run start / end, new server)
+--   Safe.pullback()  Safe.error()   -- report events
+--   Safe.cfg.enabled = false        -- the hub's on/off switch
+-- Light on purpose (phones): one check every 5 s, a file is written only when stuck or kicking.
+local M = {}
+M.cfg = {
+    enabled = true, name = "moseeri", stuckMin = 3, pullbackMax = 10, errorMax = 50, staffCheck = true, groupId = nil,
+    staffWords = { "mod", "admin", "dev", "owner", "staff", "manager", "tester", "helper", "creator" },
+    file = "msafe_state.json",
+}
+M.active = false
+local lastProgress = os.clock()
+local pulls, errs = {}, {}
+local onLog, onStuck = function() end, nil
+local HttpService = game:GetService("HttpService")
+
+local function readState()
+    local ok, t = pcall(function()
+        if isfile and isfile(M.cfg.file) then return HttpService:JSONDecode(readfile(M.cfg.file)) end
+    end)
+    return (ok and type(t) == "table") and t or {}
+end
+local function writeState(t) pcall(function() if writefile then writefile(M.cfg.file, HttpService:JSONEncode(t)) end end) end
+local function say(s) pcall(onLog, s) end
+local function countSince(list, secs)
+    local now, n = os.clock(), 0
+    for i = #list, 1, -1 do
+        if now - list[i] <= secs then n = n + 1 else table.remove(list, i) end
+    end
+    return n
+end
+
+function M.kick(code, reason)
+    local msg = string.format("%s: please rejoin for safety [%s] %s", M.cfg.name, code, reason or "")
+    local st = readState()
+    st.lastKick = { code = code, reason = reason, at = os.date("%Y-%m-%d %H:%M:%S"), t = os.time(), hub = M.cfg.name }
+    writeState(st)
+    say("SAFETY KICK " .. msg)
+    M.running = false
+    task.wait(0.5)
+    pcall(function() game:GetService("Players").LocalPlayer:Kick(msg) end)
+end
+function M.progress() lastProgress = os.clock() end
+function M.pullback() pulls[#pulls + 1] = os.clock() end
+function M.error() errs[#errs + 1] = os.clock() end
+
+function M.start(opts)
+    for k, v in pairs(opts or {}) do
+        if k == "onLog" then onLog = v elseif k == "onStuck" then onStuck = v else M.cfg[k] = v end
+    end
+    if M.running then return M end
+    M.running = true
+    lastProgress = os.clock()
+    -- tell the hub why we left last time (once, within a day)
+    local st = readState()
+    if st.lastKick and os.time() - (tonumber(st.lastKick.t) or 0) < 86400 and not st.lastKick.shown then
+        say(string.format("SAFETY last kick %s [%s] %s (%s)", tostring(st.lastKick.at), tostring(st.lastKick.code), tostring(st.lastKick.reason), tostring(st.lastKick.hub)))
+        st.lastKick.shown = true
+        writeState(st)
+    end
+    local Players = game:GetService("Players")
+    local LP = Players.LocalPlayer
+    if not M.cfg.groupId then
+        pcall(function() if game.CreatorType == Enum.CreatorType.Group then M.cfg.groupId = game.CreatorId end end)
+    end
+    local function staffCheck(p)
+        if p == LP or not M.cfg.groupId then return end
+        task.spawn(function()
+            local ok, role = pcall(function() return p:GetRoleInGroup(M.cfg.groupId) end)
+            if not (ok and type(role) == "string") or not (M.cfg.enabled and M.cfg.staffCheck and M.running) then return end
+            local r = role:lower()
+            for _, w in ipairs(M.cfg.staffWords) do
+                if r:find(w, 1, true) then M.kick("S03", "staff in server: " .. p.Name .. " (" .. role .. ")") return end
+            end
+        end)
+    end
+    for _, p in ipairs(Players:GetPlayers()) do staffCheck(p) end
+    Players.PlayerAdded:Connect(staffCheck)
+    task.spawn(function()
+        while M.running do
+            task.wait(5)
+            if M.cfg.enabled then
+                local np = countSince(pulls, 60)
+                if np > M.cfg.pullbackMax then M.kick("S02", "position pulled back " .. np .. " times in 60 s") return end
+                local ne = countSince(errs, 300)
+                if ne > M.cfg.errorMax then M.kick("S04", "script errors: " .. ne .. " in 5 min") return end
+                if M.active and os.clock() - lastProgress > M.cfg.stuckMin * 60 then
+                    lastProgress = os.clock()
+                    local s2 = readState()
+                    local again = os.time() - (tonumber(s2.stuckAt) or 0) < 600
+                    if again or not onStuck then
+                        s2.stuckAt = 0 writeState(s2)
+                        M.kick("S01", "no progress for " .. M.cfg.stuckMin .. " min" .. (again and " (twice in 10 min)" or ""))
+                        return
+                    end
+                    s2.stuckAt = os.time() writeState(s2)
+                    say("SAFETY no progress for " .. M.cfg.stuckMin .. " min - trying the hub's recovery first")
+                    pcall(onStuck)
+                end
+            else
+                lastProgress = os.clock()
+            end
+            if not M.active then lastProgress = os.clock() end
+        end
+    end)
+    return M
+end
+
+return M
+
+end)()
 
 --------------------------------------------------------------------------------
 -- game access
@@ -642,6 +766,7 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     if dt > 0.6 then lastSet = nil return end
     if (r.Position - lastSet.pos).Magnitude > 10 then
         S.pullBacks = S.pullBacks + 1
+        if MSafe then MSafe.pullback() end
         log(string.format("PULLBACK set %s now %s", v3s(lastSet.pos), v3s(r.Position)))
         lastSet = nil
     end
@@ -824,6 +949,7 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     if not r then return end
     if (r.Position - hold.cf.Position).Magnitude > 12 then
         S.pullBacks = S.pullBacks + 1
+        if MSafe then MSafe.pullback() end
         log(string.format("PULLBACK (hover) want %s now %s", v3s(hold.cf.Position), v3s(r.Position)))
     end
     r.AssemblyLinearVelocity = Vector3.zero
@@ -2019,6 +2145,30 @@ do
     if sr then F.conns[#F.conns + 1] = sr.OnClientEvent:Connect(function() if rec.pts then recSave("run cleared") end end) end
 end
 
+--------------------------------------------------------------------------------
+-- safety (shared msafe module, also for the aa / gpo / nexus hubs): kicks with
+-- "moseeri dungeon: please rejoin for safety [S01..S04]" when stuck twice, pulled back a lot, staff joins, or errors pile up.
+-- First stuck: back to a fresh lobby server.
+--------------------------------------------------------------------------------
+local Safe = MSafe.start({ name = "moseeri dungeon", onLog = log, onStuck = function() toLobby() end,
+    stuckMin = tonumber(cfg.stuckMin) or 3,
+    pullbackMax = 25, -- our own hover / hold corrections show up as pull-backs too (about 1 a minute), so higher than default
+    enabled = cfg.watchdog ~= false })
+do
+    local function ddv() local p = LP:FindFirstChild("dungPerformance") local v = p and p:FindFirstChild("damageDone") return v and v.Value or 0 end
+    local lastDD, lastPhase = ddv(), S.phase
+    go("safety", function()
+        while F.alive do
+            task.wait(2)
+            Safe.cfg.enabled = cfg.watchdog ~= false
+            Safe.active = cfg.farm and (not IN_LOBBY or cfg.autoJoin) and not S.limitBusy and not cfg.recordRoute
+            local dd = ddv()
+            if dd ~= lastDD or (S.phase ~= lastPhase and (S.phase == "start" or S.phase == "end")) then Safe.progress() end
+            lastDD, lastPhase = dd, S.phase
+        end
+    end)
+end
+
 go("farm", function()
     while F.alive do
         if cfg.recordRoute and not cfg.farm and IN_LOBBY then
@@ -2028,7 +2178,7 @@ go("farm", function()
             task.wait(0.5)
         elseif (IN_LOBBY and (cfg.farm or cfg.autoJoin) or cfg.farm) and not S.limitBusy then
             local ok, err = pcall(IN_LOBBY and lobbyTick or dungeonTick)
-            if not ok then S.errors = S.errors + 1 log("ERR tick: " .. tostring(err)) task.wait(1) end
+            if not ok then S.errors = S.errors + 1 MSafe.error() log("ERR tick: " .. tostring(err)) task.wait(1) end
             task.wait(0.1)
         else
             swingOn = false
@@ -2480,6 +2630,7 @@ local farmP = UI.page("Farm", 1)
 local fc = UI.card(farmP, 1, "Dungeon")
 UI.toggle(fc, "Auto farm (fight in dungeons)", get("farm"), set("farm"))
 UI.toggle(fc, "Retry after clear (off = lobby)", get("retry"), set("retry"))
+UI.toggle(fc, "Safety kick (stuck / staff / pull-backs)", get("watchdog"), set("watchdog"))
 UI.toggle(fc, "Hardcore", get("hardcore"), set("hardcore"))
 UI.info(fc, "Now", function() return S.phase .. " · " .. tostring(S.target) end)
 

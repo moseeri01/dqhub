@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_47"
+local VERSION = "dq_48"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -83,6 +83,13 @@ pcall(function()
     end
 end)
 local function saveCfg() pcall(function() writefile(DIR .. "/cfg.json", HttpService:JSONEncode(cfg)) end) end
+-- a fresh join (the owner ran the loader by hand) starts with Auto farm OFF; only our own teleports (Retry,
+-- lobby trips) and reloads carry on farming (11-21: joining the game walked straight into a dungeon)
+do
+    local carryOn = G.dq_continue == true
+    G.dq_continue = nil
+    if not carryOn and cfg.farm then cfg.farm = false saveCfg() end
+end
 
 -- reload this file after every teleport (Retry / Return / PlaySolo move us to new servers)
 pcall(function()
@@ -90,7 +97,7 @@ pcall(function()
     local q = queue_on_teleport or (syn and syn.queue_on_teleport)
     -- the owner's PC has dq/dev.flag: load the local build; everyone else loads the GitHub copy
     if q then
-        q('local ok = pcall(function() if isfile and isfile("dq/dev.flag") then loadstring(readfile("dq/dq.lua"))() else error("web") end end) ' ..
+        q('getgenv().dq_continue = true local ok = pcall(function() if isfile and isfile("dq/dev.flag") then loadstring(readfile("dq/dq.lua"))() else error("web") end end) ' ..
           'if not ok then loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))() end')
         G.__dq_queued = true
     end
@@ -2142,7 +2149,7 @@ local function runCmd(line)
             pcall(function() writefile(DIR .. "/around.txt", table.concat(lines, "\n")) end)
             log("AROUND " .. #lines .. " lines -> dq/around.txt")
         end)
-    elseif a == "reload" then task.spawn(function() loadstring(readfile(DIR .. "/dq.lua"))() end)
+    elseif a == "reload" then task.spawn(function() G.dq_continue = true loadstring(readfile(DIR .. "/dq.lua"))() end)
     elseif a == "stop" then if G.__dq_stop then G.__dq_stop() end
     end
 end

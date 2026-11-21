@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_90"
+local VERSION = "dq_91"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -71,7 +71,7 @@ local DEFAULT = {
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
     autoBest = true, retry = true, dodge = false, dodgeLight = true, -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
-    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
+    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false, tuneSet = 0,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
 }
 local cfg = {}
@@ -83,6 +83,12 @@ pcall(function()
     end
 end)
 local function saveCfg() pcall(function() writefile(DIR .. "/cfg.json", HttpService:JSONEncode(cfg)) end) end
+-- 11-21 (dq_91): one friend keeps getting kicked #101, the owner never: put everyone once on the owner's movement settings
+if (tonumber(cfg.tuneSet) or 0) < 91 then
+    cfg.move, cfg.tpStep, cfg.tpWait, cfg.tweenSpeed, cfg.hover, cfg.swingRate, cfg.standDist = "Teleport", 60, 0.12, 60, 10, 10, 4
+    cfg.tuneSet = 91
+    saveCfg()
+end
 -- a fresh join (the owner ran the loader by hand) starts with Auto farm OFF; only our own teleports (Retry,
 -- lobby trips) and reloads carry on farming (11-21: joining the game walked straight into a dungeon)
 do
@@ -1268,8 +1274,8 @@ local function dodgeCheck()
     if not r then return false end
     -- 11-21 DQKICK: a friend (not the party host) got #101 after 40 dodges in 27 s, 20-50 studs each. The host never does,
     -- so in a party: at most one dodge a second and only short ones (25 studs); otherwise stay and take the hit.
-    local party = not IN_LOBBY and #Players:GetPlayers() > 1
-    if os.clock() - lastDodge < (party and 1.0 or 0.25) then return false end
+    -- (dq_90 slowed party dodges to 1/s, 25 studs: the friend was still kicked with only 8 dodges - back to the old rule)
+    if os.clock() - lastDodge < 0.25 then return false end
     local zone = dangerAt(r.Position)
     -- Light: let small zones hit us, leave only the big area attacks
     if zone and not zoneWorthDodging(zone) then
@@ -1289,7 +1295,6 @@ local function dodgeCheck()
             if os.clock() - (S.noSpotT or 0) > 3 then S.noSpotT = os.clock() log(string.format("DODGE no clear spot with floor near %s (zone %s %.0fx%.0fx%.0f)", v3s(r.Position), zone.Name, zone.Size.X, zone.Size.Y, zone.Size.Z)) end
             return false
         end
-        if party and (to - r.Position).Magnitude > 25 then return false end
         lastDodge = os.clock()
         local look = (curTarget and curTarget.Parent) and curTarget.Position or (to + r.CFrame.LookVector)
         -- never one instant jump of more than 40 studs (anti-cheat #101): longer dodges go in steps
@@ -2336,8 +2341,34 @@ end
 --------------------------------------------------------------------------------
 -- any kick / disconnect (game anti-cheat #101 too): keep the last 150 log lines in dq/lastkick.txt on every device,
 -- so a friend can send the file (11-21: a friend dropped with #101 only in party runs, and friends keep no log file)
+S.moves = {}
+go("movesampler", function()
+    while F.alive do
+        task.wait(0.25)
+        local r = hrp()
+        if r and not IN_LOBBY then
+            local m = S.moves
+            m[#m + 1] = { t = os.clock(), p = r.Position }
+            if #m > 60 then table.remove(m, 1) end
+        end
+    end
+end)
+local function moveStats()
+    local m, maxStep, sum10, n = S.moves, 0, 0, 0
+    for i = 2, #m do
+        local d = (m[i].p - m[i - 1].p).Magnitude
+        if d > maxStep then maxStep = d end
+        if os.clock() - m[i].t <= 10 then sum10 = sum10 + d n = n + 1 end
+    end
+    local fast = 0
+    for i = 2, #m do if (m[i].p - m[i - 1].p).Magnitude > 12 then fast = fast + 1 end end
+    return string.format("moved %.0f studs in last 10 s, biggest 0.25 s step %.0f, steps over 12 studs %d/%d", sum10, maxStep, fast, #m - 1)
+end
+S.moveStats = moveStats
 local function onKick(msg)
         if not msg or msg == "" then return end
+        -- teleports between places also fire this: not a kick
+        if msg == "DisconnectClientInitiated" or msg:find("Teleport") then return end
         local L = F.logLines
         local out = { os.date("%Y-%m-%d %H:%M:%S") .. " " .. VERSION .. " place " .. tostring(game.PlaceId) .. " players " .. #Players:GetPlayers(), "message: " .. msg }
         for i = math.max(1, #L - 149), #L do out[#out + 1] = L[i] end
@@ -2357,12 +2388,21 @@ local function onKick(msg)
             local tail = {}
             for i = #L, 1, -1 do
                 local s = L[i]
-                if not (s:find(" PREDODGE ") or s:find(" NEWOBJ ") or s:find(" TARGET ")) then table.insert(tail, 1, s:sub(1, 160)) end
+                if not (s:find(" PREDODGE ") or s:find(" NEWOBJ ") or s:find(" TARGET ")) then table.insert(tail, 1, s:sub(1, 110)) end
                 if #tail >= 25 then break end
             end
-            local body = "DQKICK " .. VERSION .. " id " .. tostring(LP.UserId % 100000) .. " | " .. msg:sub(1, 120)
-                .. " | place " .. tostring(game.PlaceId) .. " players " .. #Players:GetPlayers() .. "\n```\n" .. table.concat(tail, "\n")
-            body = body:sub(1, 1890) .. "\n```"
+            local h = hum()
+            local head = "DQKICK " .. VERSION .. " id " .. tostring(LP.UserId % 100000) .. " | " .. msg:sub(1, 120)
+                .. " | place " .. tostring(game.PlaceId) .. " players " .. #Players:GetPlayers()
+                .. "\nsettings: move " .. tostring(cfg.move) .. " step " .. tostring(cfg.tpStep) .. " wait " .. tostring(cfg.tpWait)
+                .. " hover " .. tostring(cfg.hover) .. " swing " .. tostring(cfg.swingRate) .. " dodge " .. (cfg.dodge and "Full" or (cfg.dodgeLight and "Light" or "Off"))
+                .. " stand " .. tostring(cfg.standDist) .. " speed " .. tostring(h and h.WalkSpeed)
+                .. "\n" .. moveStats()
+            -- keep the newest lines (the old cut dropped the last 13 s before the kick)
+            local text = table.concat(tail, "\n")
+            local room = 1880 - #head
+            if #text > room then text = text:sub(#text - room + 1) end
+            local body = head .. "\n```\n" .. text .. "\n```"
             local ok, res = pcall(req, { Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode({ content = body }) })
             log("KICK report to Discord: " .. (ok and type(res) == "table" and tostring(res.StatusCode) or ("failed " .. tostring(res))))
         end)

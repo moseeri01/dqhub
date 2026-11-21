@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_97"
+local VERSION = "dq_98"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -687,7 +687,7 @@ local function pickTarget()
         if cfg.bossFirst then score = score - e.h.MaxHealth / 50 end -- big hp pool = boss = first
         -- orbs / gems / totems next to a boss (Sunken Fortress: Barbed Orb Sentry beside Fortress Shaman, 11-21 one-hit death): before the boss
         local nm = e.m.Name:lower()
-        if nm:find("orb") or nm:find("sentry") or nm:find("crystal") or nm:find("gem") or nm:find("totem") or nm:find("pylon") or nm:find("statue") or nm:find("powered") or nm:find("pillar") or nm:find("generator") or nm:find("obelisk") then score = score - 2000 end
+        if nm:find("orb") or nm:find("sentry") or nm:find("crystal") or nm:find("gem") or nm:find("totem") or nm:find("pylon") or nm:find("statue") or nm:find("powered") or nm:find("pillar") or nm:find("generator") or nm:find("obelisk") or nm:find("tower") then score = score - 2000 end
         -- healers first of all: Fortress Shaman carries a "heal" Beam (dq mobs scan 11-21) and keeps the others alive
         if e.m:FindFirstChild("heal") or nm:find("shaman") or nm:find("cleric") or nm:find("healer") then score = score - 3000 end
         -- the game marks real bosses with attribute Boss = true (seen on Blightwyrm): those first among big mobs

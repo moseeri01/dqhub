@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_87"
+local VERSION = "dq_88"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -829,6 +829,8 @@ local function moveTo(pos, lookAt, mode)
     lookAt = lookAt or pos
     if mode == "Teleport" then
         local step = math.max(5, tonumber(cfg.tpStep) or 60)
+        -- 11-21: a friend in the same dungeon got kicked (#101), solo never: with others here half speed (30 studs a step)
+        if not IN_LOBBY and #game:GetService("Players"):GetPlayers() > 1 then step = math.min(step, 30) end
         for _ = 1, 60 do
             r = hrp()
             if not r or not F.alive then return end
@@ -992,6 +994,9 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     -- (a gap here is our own hold fighting our own moves, not the server: never counted - it set off a false
     -- safety kick [S02] "686 pull-backs in 60 s" on 11-21 16:13)
     if S.movingUntil and os.clock() < S.movingUntil then return end
+    -- 11-21 party kick #101: snapping back to the hold spot after the server / a knockback / a respawn moved us far
+    -- looks like a teleport hack to the game. Far from the hold = drop it; engage walks us back in steps.
+    if (r.Position - hold.cf.Position).Magnitude > 12 then hold = nil return end
     lastSet = nil -- this move is ours (review 11-21: a dodge followed by a hold on another spot looked like a pull-back)
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = hold.cf
@@ -2325,6 +2330,17 @@ end
 -- "moseeri dungeon: please rejoin for safety [S01..S04]" when stuck twice, pulled back a lot, staff joins, or errors pile up.
 -- First stuck: back to a fresh lobby server.
 --------------------------------------------------------------------------------
+-- any kick / disconnect (game anti-cheat #101 too): keep the last 150 log lines in dq/lastkick.txt on every device,
+-- so a friend can send the file (11-21: a friend dropped with #101 only in party runs, and friends keep no log file)
+pcall(function()
+    F.conns[#F.conns + 1] = game:GetService("GuiService").ErrorMessageChanged:Connect(function(msg)
+        if not msg or msg == "" then return end
+        local L = F.logLines
+        local out = { os.date("%Y-%m-%d %H:%M:%S") .. " " .. VERSION .. " place " .. tostring(game.PlaceId) .. " players " .. #Players:GetPlayers(), "message: " .. msg }
+        for i = math.max(1, #L - 149), #L do out[#out + 1] = L[i] end
+        pcall(function() if not isfolder(DIR) then makefolder(DIR) end writefile(DIR .. "/lastkick.txt", table.concat(out, "\n")) end)
+    end)
+end)
 local Safe = MSafe.start({ name = "moseeri dungeon", onLog = log, onStuck = function() toLobby() end,
     stuckMin = tonumber(cfg.stuckMin) or 3,
     pullbackMax = 25, -- our own hover / hold corrections show up as pull-backs too (about 1 a minute), so higher than default

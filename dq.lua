@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_96"
+local VERSION = "dq_97"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -858,17 +858,10 @@ local function moveTo(pos, lookAt, mode)
     lookAt = lookAt or pos
     if mode == "Teleport" then
         local step = math.max(5, tonumber(cfg.tpStep) or 60)
-        -- 11-21: a friend in the same dungeon got kicked (#101), solo never: with others here half speed (30 studs a step)
-        if not IN_LOBBY and #game:GetService("Players"):GetPlayers() > 1 then step = math.min(step, 30) end
         for _ = 1, 60 do
             r = hrp()
             if not r or not F.alive then return end
             local d = pos - r.Position
-            local w0 = os.clock()
-            while movedRecently() > MOVE_BUDGET and os.clock() - w0 < 3 and F.alive do task.wait(0.1) end
-            r = hrp()
-            if not r then return end
-            d = pos - r.Position
             if d.Magnitude <= step then setCF(faceCF(pos, lookAt)) return end
             setCF(faceCF(r.Position + d.Unit * step, lookAt))
             task.wait(tonumber(cfg.tpWait) or 0.12)
@@ -2996,7 +2989,7 @@ local function runCmd(line)
             pcall(function() writefile(DIR .. "/around.txt", table.concat(lines, "\n")) end)
             log("AROUND " .. #lines .. " lines -> dq/around.txt")
         end)
-    elseif a == "reload" then task.spawn(function() G.dq_continue = true loadstring(readfile(DIR .. "/dq.lua"))() end)
+    elseif a == "reload" then task.spawn(function() G.dq_continue = true loadstring(readfile("dq/dq.lua"))() end) -- always the shared build (a 2nd account has DIR = dq/acc_<id>)
     elseif a == "stop" then if G.__dq_stop then G.__dq_stop() end
     end
 end

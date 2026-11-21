@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_55"
+local VERSION = "dq_56"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -2272,7 +2272,6 @@ local function mapReq(name) for _, m in ipairs(MAP_REQ) do if m.map == name then
 local farmP = UI.page("Farm", 1)
 local fc = UI.card(farmP, 1, "Dungeon")
 UI.toggle(fc, "Auto farm (fight in dungeons)", get("farm"), set("farm"))
-UI.toggle(fc, "Auto join dungeon (from lobby)", get("autoJoin"), set("autoJoin"))
 UI.toggle(fc, "Auto best (level up)", get("autoBest"), set("autoBest"))
 UI.toggle(fc, "Retry after clear (off = lobby)", get("retry"), set("retry"))
 UI.toggle(fc, "Hardcore", get("hardcore"), set("hardcore"))
@@ -2288,6 +2287,7 @@ UI.toggle(fi, "Auto Q / E", get("autoQE"), set("autoQE"))
 UI.toggle(fi, "Boss first", get("bossFirst"), set("bossFirst"))
 
 local pk = UI.card(farmP, 2, "Pick")
+UI.toggle(pk, "Auto join dungeon (from lobby)", get("autoJoin"), set("autoJoin"))
 UI.info(pk, "Playing", function()
     local m, d = playing()
     return m .. " · " .. d .. (cfg.autoBest and "  (auto)" or "")

@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_51"
+local VERSION = "dq_54"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -71,7 +71,7 @@ local DEFAULT = {
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
     autoBest = true, retry = true, dodge = false, dodgeLight = true, -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
-    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, dangerAnims = {}, bossCells = {}, mobHeight = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
+    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
 }
 local cfg = {}
@@ -375,16 +375,29 @@ function UI.dropdown(card, text, height, getItems, getKey, onPick, multi)
     corner(b, 6)
     new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 24) }, b)
     local arrow = label(b, "v", 12, T.mute, Enum.Font.GothamBold, { Size = UDim2.fromOffset(14, 28), Position = UDim2.new(1, 6, 0, 0) })
-    card.n = card.n + 1
-    local sf = new("ScrollingFrame", { Size = UDim2.new(1, 0, 0, height), BackgroundTransparency = 1, BorderSizePixel = 0, LayoutOrder = card.n, Visible = false,
-        ScrollBarThickness = 4, ScrollBarImageColor3 = T.faint, CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y }, card.frame)
+    -- the list floats over the window under the button (owner 11-21: opening must not push the rows below down)
+    local sf = new("ScrollingFrame", { Size = UDim2.fromOffset(200, height), BackgroundColor3 = T.card, BorderSizePixel = 0, Visible = false, ZIndex = 50,
+        ScrollBarThickness = 4, ScrollBarImageColor3 = T.faint, CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y }, win)
+    corner(sf, 8)
+    stroke(sf, T.accent)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4) }, sf)
     new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, sf)
     local rows, sig = {}, ""
     local paint
-    local function setOpen(on)
+    local setOpen
+    setOpen = function(on)
+        if on then
+            if UI.openDD and UI.openDD ~= setOpen then pcall(UI.openDD, false) end -- one list open at a time
+            UI.openDD = setOpen
+            local s = scale.Scale
+            local ap = (b.AbsolutePosition - win.AbsolutePosition) / s
+            sf.Size = UDim2.fromOffset(b.AbsoluteSize.X / s + 8, height)
+            sf.Position = UDim2.fromOffset(ap.X - 4, ap.Y + b.AbsoluteSize.Y / s + 3)
+        elseif UI.openDD == setOpen then
+            UI.openDD = nil
+        end
         sf.Visible = on
         arrow.Text = on and "^" or "v"
-        if UI.current then UI.show(UI.current) end      -- the window height follows
     end
     local lastKey = {}
     paint = function()
@@ -427,6 +440,8 @@ function UI.dropdown(card, text, height, getItems, getKey, onPick, multi)
                 end
             end
         end
+        -- the list floats at ZIndex 50: its rows must draw above it (Global z order hid them, 11-21)
+        for _, dsc in ipairs(sf:GetDescendants()) do if dsc:IsA("GuiObject") and dsc.ZIndex < 52 then dsc.ZIndex = 52 end end
         local shown = "-"
         for _, it in ipairs(items) do if not it.header and it.key == cur then shown = it.short or it.text end end
         if multi then pcall(function() shown = multi.summary() end) end
@@ -446,6 +461,23 @@ function UI.dropdown(card, text, height, getItems, getKey, onPick, multi)
     b.MouseButton1Click:Connect(function() setOpen(not sf.Visible) end)
     paint()
     UI.refreshers[#UI.refreshers + 1] = paint
+end
+
+-- owner 11-21: "pick in a dropdown, not tap to cycle" - every choice row is now a dropdown
+UI.choice = function(card, text, options, get, setv)
+    UI.dropdown(card, text, math.min(160, #options * 29 + 6), function()
+        local out = {}
+        for _, o in ipairs(options) do out[#out + 1] = { key = o, text = tostring(o) } end
+        return out
+    end, get, setv)
+end
+-- switching tabs closes an open list
+do
+    local oldShow = UI.show
+    UI.show = function(name)
+        if UI.openDD then pcall(UI.openDD, false) end
+        return oldShow(name)
+    end
 end
 
 
@@ -1016,6 +1048,7 @@ do
 end
 S.dodges = 0
 local lastDodge = 0
+local zoneWorthDodging -- set further down (needs the learned threat table)
 local function dodgeCheck()
     if IN_LOBBY then return false end
     do -- safe zone beats everything else, red zones included
@@ -1036,7 +1069,11 @@ local function dodgeCheck()
     if os.clock() - lastDodge < 0.25 then return false end
     local zone = dangerAt(r.Position)
     -- Light: let small zones hit us, leave only the big area attacks
-    if zone and not cfg.dodge and math.max(zone.Size.X, zone.Size.Z) < 40 then zone = nil end
+    if zone and not zoneWorthDodging(zone) then
+        -- the zone we are in is harmless by experience; still dodge if another one here is not
+        zone = nil
+        for _, p in ipairs(liveDangers()) do if inZone(r.Position, p) and zoneWorthDodging(p) then zone = p break end end
+    end
     if zone then
         S.zoneSeen = S.zoneSeen or {}
         if cfg.timingLog and not S.zoneSeen[zone] then
@@ -1098,9 +1135,31 @@ end
 local animLog = {} -- {mob = model, root = part, id = string, t = clock}
 local recentDeaths = {} -- {name, t, pos}
 S.avoid = nil -- {root, radius, untilT, id}
+-- learned threat (owner 11-21: "dodge smarter"): every hit taken inside zones adds that hit's share of our max hp to
+-- each zone shape we stood in (cfg.zoneDmg[sig] = {n, d}); Light mode dodges a zone only when its shape has hurt
+-- (12 %+ of max hp per hit) or, unknown yet, when it is wide (40+). Small known-harmless zones: stay and hit.
+local function zoneSig(p)
+    local nm = (p.Parent and p.Parent ~= workspace) and p.Parent.Name or p.Name
+    local function r5(v) return math.floor(v / 5 + 0.5) * 5 end
+    return nm .. ":" .. r5(p.Size.X) .. "x" .. r5(p.Size.Z)
+end
+local function zoneThreat(p)
+    local z = cfg.zoneDmg[zoneSig(p)]
+    if z and (z.n or 0) >= 1 then return (z.d or 0) / z.n, z.n end
+    return nil, 0
+end
+zoneWorthDodging = function(p)
+    if cfg.dodge then return true end
+    local avg = zoneThreat(p)
+    if avg then return avg >= 0.12 end
+    return math.max(p.Size.X, p.Size.Z) >= 40
+end
 local function animWarn(id)
     local a = cfg.dangerAnims[id]
-    return a and (a.h or 0) >= 2 and (a.h or 0) / math.max(1, a.p or 1) >= 0.3
+    if not (a and (a.h or 0) >= 2 and (a.h or 0) / math.max(1, a.p or 1) >= 0.3) then return false end
+    -- Light: only wind-ups whose hits were big (15 %+ of max hp on average)
+    if not cfg.dodge then return (a.d or 0) / math.max(1, a.h) >= 0.15 end
+    return true
 end
 local function hookMob(m)
     pcall(function()
@@ -1120,7 +1179,7 @@ local function hookMob(m)
             local a = cfg.dangerAnims[id] or { p = 0, h = 0, r = 0 }
             a.p = (a.p or 0) + 1
             cfg.dangerAnims[id] = a
-            if cfg.dodge and cfg.farm and animWarn(id) and root then
+            if (cfg.dodge or cfg.dodgeLight) and cfg.farm and animWarn(id) and root then
                 local r = hrp()
                 local reach = math.max(18, a.r or 0)
                 if r and (flat(root.Position) - flat(r.Position)).Magnitude < reach + 6 then
@@ -1166,7 +1225,7 @@ do
                         local a = cfg.dangerAnims[id] or { p = 0, h = 0, r = 0 }
                         a.p = (a.p or 0) + 1
                         cfg.dangerAnims[id] = a
-                        if cfg.dodge and cfg.farm and animWarn(id) and root then
+                        if (cfg.dodge or cfg.dodgeLight) and cfg.farm and animWarn(id) and root then
                             local r = hrp()
                             local reach = math.max(18, a.r or 0)
                             if r and (flat(root.Position) - flat(r.Position)).Magnitude < reach + 6 then
@@ -1195,9 +1254,22 @@ local function learnHit(dmg, maxHp)
                 used[key] = true
                 local a = cfg.dangerAnims[e.id] or { p = 1, h = 0, r = 0 }
                 a.h = (a.h or 0) + 1
+                a.d = (a.d or 0) + dmg / maxHp
                 a.r = math.max(a.r or 0, math.min(60, d + 8))
                 cfg.dangerAnims[e.id] = a
                 names[#names + 1] = string.format("%s:%s(%d/%d)", e.mob.Name, e.id, a.h, a.p or 1)
+            end
+        end
+    end
+    local zn = {}
+    for _, p in ipairs(liveDangers()) do
+        if inZone(r.Position, p, 0) then
+            local sig = zoneSig(p)
+            if not zn[sig] then
+                zn[sig] = true
+                local z = cfg.zoneDmg[sig] or { n = 0, d = 0 }
+                z.n, z.d = (z.n or 0) + 1, (z.d or 0) + dmg / maxHp
+                cfg.zoneDmg[sig] = z
             end
         end
     end

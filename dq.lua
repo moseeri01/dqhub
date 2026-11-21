@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_79"
+local VERSION = "dq_86"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -675,8 +675,18 @@ local function pickTarget()
         if nm:find("orb") or nm:find("sentry") or nm:find("crystal") or nm:find("gem") or nm:find("totem") or nm:find("pylon") then score = score - 2000 end
         -- healers first of all: Fortress Shaman carries a "heal" Beam (dq mobs scan 11-21) and keeps the others alive
         if e.m:FindFirstChild("heal") or nm:find("shaman") or nm:find("cleric") or nm:find("healer") then score = score - 3000 end
+        -- the game marks real bosses with attribute Boss = true (seen on Blightwyrm): those first among big mobs
+        if e.m:GetAttribute("Boss") == true then score = score - 1500 end
+        -- a mob whose hp did not move while we hit it (decoy / immune phase, owner 11-21: lvl 80 boss copies): skip it a while
+        -- 11-21 lvl 80 Electro Elemental: immune at 50% until Powered Statue (8.26M) dies; +100000 lost to the -hp/50 boss bonus -> +1e9 = only when nothing else is left
+        if S.decoy and S.decoy[e.m] and (os.clock() < S.decoy[e.m] or (S.decoyHp and S.decoyHp[e.m] and e.h.Health >= S.decoyHp[e.m] - 1)) then score = score + 1e9 end
+        -- 11-21 lvl 80: 12 mobs with the same 11M hp -> the pick flipped several times a second and nothing died.
+        -- Stick to the current target (worth 60 studs) and among equals finish the most hurt one first.
+        if e.m == S.stickTo then score = score - 60 end
+        score = score + (e.h.Health / math.max(e.h.MaxHealth, 1)) * 30
         if not bestScore or score < bestScore then best, bestScore = e, score end
     end
+    S.stickTo = best and best.m or nil
     return best
 end
 
@@ -1342,6 +1352,8 @@ local function zoneThreat(p)
 end
 zoneWorthDodging = function(p)
     if cfg.dodge then return true end
+    -- lingering pools (Heldeir 50x50, 11-21): each tick is small (~6%) but they add up - leave once this zone took 10%
+    if S.zoneHits and (S.zoneHits[p] or 0) >= 0.10 then return true end
     local avg = zoneThreat(p)
     if avg then return avg >= 0.12 end
     return math.max(p.Size.X, p.Size.Z) >= 40
@@ -1456,6 +1468,8 @@ local function learnHit(dmg, maxHp)
     local zn = {}
     for _, p in ipairs(liveDangers()) do
         if inZone(r.Position, p, 0) then
+            S.zoneHits = S.zoneHits or setmetatable({}, { __mode = "k" })
+            S.zoneHits[p] = (S.zoneHits[p] or 0) + dmg / maxHp
             local sig = zoneSig(p)
             if not zn[sig] then
                 zn[sig] = true
@@ -1604,6 +1618,23 @@ local function engage(e)
     local r = hrp()
     if not r then return end
     if S.movingUntil and os.clock() < S.movingUntil then return end -- a stepped dodge is still moving us
+    -- decoy check: same target for 6 s of swinging and its hp has not dropped -> skip it for 20 s
+    do
+        local now = os.clock()
+        S.decoy = S.decoy or {}
+        if S.dTarget ~= e.m then S.dTarget, S.dT0, S.dHp = e.m, now, e.h.Health
+        elseif swingOn and now - S.dT0 > 6 then
+            if e.h.Health >= S.dHp - 1 then
+                S.decoy[e.m] = now + 20
+                S.decoyHp = S.decoyHp or setmetatable({}, { __mode = "k" })
+                S.decoyHp[e.m] = e.h.Health
+                log(string.format("DECOY? %s hp %.0f did not drop in 6 s of hitting - trying another target", e.m.Name, e.h.Health))
+                S.dTarget = nil
+                return
+            end
+            S.dT0, S.dHp = now, e.h.Health
+        end
+    end
     -- safe zone up: we stay in it (dodgeCheck holds us there); hit whatever is in reach from inside
     if safeZone() then
         hold = nil
@@ -1612,6 +1643,7 @@ local function engage(e)
         if swingOn and cfg.autoQE then
             if castReady("Q") then cast("Q") end
             if castReady("E") then cast("E") end
+            if castReady("R") then cast("R") end
         trySwap()
         end
         S.target = "in the safe zone"
@@ -1629,6 +1661,7 @@ local function engage(e)
             if swingOn and cfg.autoQE then
                 if castReady("Q") then cast("Q") end
                 if castReady("E") then cast("E") end
+                if castReady("R") then cast("R") end
         trySwap()
             end
             return
@@ -1703,6 +1736,7 @@ local function engage(e)
     if swingOn and cfg.autoQE then
         if castReady("Q") then cast("Q") end
         if castReady("E") then cast("E") end
+        if castReady("R") then cast("R") end
         trySwap()
     end
 end
@@ -1806,7 +1840,7 @@ local function dungeonTick()
         if os.clock() - endSeen > 4 and not S.jobsRunning then
             -- the screen has two copies of Retry / Return (CompletionMain and a smaller panel): take a shown one
             -- after a death never Retry the same dungeon (11-21: Retry looped Sunken Fortress twice into death)
-            local want = (cfg.retry and not S.needSell and (not S.diedThisRun or #Players:GetPlayers() > 1)) and "Retry" or "Return"
+            local want = (cfg.retry and not S.needSell) and "Retry" or "Return"
             local btn, seen = nil, {}
             local root = pgui("CompletionScreen")
             for _, d in ipairs(root and root:GetDescendants() or {}) do
@@ -1849,6 +1883,16 @@ local function dungeonTick()
     if e then
         S.phase = "fight"
         S.target = string.format("%s %.0f/%.0f", e.m.Name, e.h.Health, e.h.MaxHealth)
+        -- DEV: every target change with all live mobs (owner 11-21: lvl 80 "hits the fake one, too slow")
+        if DEV and S.lastTgt ~= e.m then
+            S.lastTgt = e.m
+            local all = {}
+            for _, x in ipairs(enemies()) do
+                all[#all + 1] = string.format("%s %.1fM/%.1fM%s%s", x.m.Name, x.h.Health / 1e6, x.h.MaxHealth / 1e6,
+                    x.m:GetAttribute("Boss") == true and " BOSS" or "", (S.decoy and S.decoy[x.m] and os.clock() < S.decoy[x.m]) and " IMMUNE" or "")
+            end
+            log("TARGET " .. S.target .. " | all: " .. table.concat(all, ", "))
+        end
         engage(e)
     else
         swingOn = false
@@ -2469,6 +2513,37 @@ local function runCmd(line)
     elseif a == "return" then local rl = R("ReturnLobby") if rl then rl:FireServer() end
     elseif a == "lobby" then toLobby()
     elseif a == "jobs" then go("jobs", lobbyJobs)
+    elseif a == "roll" then
+        -- one free Relic dice roll (RollWeapon, the game's roll button); log the whole answer incl. cooldown
+        go("roll", function()
+            local rem = R("RollWeapon")
+            if not rem then log("ROLL no RollWeapon here (" .. (IN_LOBBY and "lobby" or "dungeon") .. ")") return end
+            -- the game answers {ok, cooldown, retryIn, weapons}; can take long, so wait up to 30 s here
+            local res, done = nil, false
+            task.spawn(function() local ok, r = pcall(function() return rem:InvokeServer() end) res = ok and r or ("error " .. tostring(r)) done = true end)
+            local t0 = os.clock()
+            while not done and os.clock() - t0 < 30 do task.wait(0.2) end
+            if not done then log("ROLL no answer in 30 s") end
+            pcall(function()
+                local b = LP.PlayerGui:FindFirstChild("mainGui", true)
+                local bp = b and b:FindFirstChild("HalloweenBP", true)
+                log("ROLL button " .. (bp and ("found, visible=" .. tostring(bp.Visible) .. " parentVisible=" .. tostring(bp.Parent.Visible)) or "missing"))
+            end)
+            local function dump(v, depth)
+                if type(v) ~= "table" then return tostring(v) end
+                if depth > 2 then return "{...}" end
+                local t = {}
+                for k, x in pairs(v) do t[#t + 1] = tostring(k) .. "=" .. dump(x, depth + 1) end
+                return "{" .. table.concat(t, ", ") .. "}"
+            end
+            log("ROLL (" .. (IN_LOBBY and "lobby" or "dungeon") .. ") -> " .. dump(res, 0):sub(1, 400))
+            local attrs = {}
+            for k, v in pairs(LP:GetAttributes()) do
+                local kl = k:lower()
+                if kl:find("roll") or kl:find("rng") or kl:find("relic") or kl:find("dice") or kl:find("luck") then attrs[#attrs + 1] = k .. "=" .. tostring(v) end
+            end
+            log("ROLL player attrs: " .. table.concat(attrs, " "))
+        end)
     elseif a == "sell" then go("sell", sellNow)
     elseif a == "slots" then
         -- put spare spells into backup slots 1 / 2 (Blue Flames first, then spare Deadly Whirls); nothing is sold or dropped
@@ -2522,6 +2597,8 @@ local function runCmd(line)
             local want = { "ClientDamage", "EnemyAttack", "EnemyRemote", "TakeDamage", "SendSellNPC", "touchOrb", "LegacyTokenFound",
                 "SecretDropShown", "Forcefield", "SpawnCompanion", "ContinueInf", "NextTier", "kaboomEvent", "FlashstepState",
                 "UpdateKeys", "SendRune", "DropItem", "lootDropTest", "PerformanceReport", "NextRoom", "SwapCanSpawn", "Modifier" }
+            -- "dumpsrc A,B,C" = keep scripts that mention these words instead
+            if b ~= "" then want = {} for w in b:gmatch("[^,]+") do want[#want + 1] = w end end
             local dir = DIR .. "/dsrc_" .. tostring(game.PlaceId)
             pcall(function() if not isfolder(dir) then makefolder(dir) end end)
             local list, seen = {}, {}
@@ -2662,6 +2739,15 @@ local function runCmd(line)
             end
             pcall(function() writefile(DIR .. "/inv.txt", table.concat(out, "\n")) end)
             log("INV -> dq/inv.txt")
+        end)
+    elseif a == "eval" then
+        -- dev only: run one Lua line and log what it returns (cmd.txt is read only when dq/dev.flag exists)
+        go("eval", function()
+            local fn, err = loadstring("return " .. b .. (c ~= "" and (" " .. c) or ""))
+            if not fn then fn, err = loadstring(b .. (c ~= "" and (" " .. c) or "")) end
+            if not fn then log("EVAL compile " .. tostring(err)) return end
+            local ok, r = pcall(fn)
+            log("EVAL " .. (ok and "" or "error ") .. tostring(r):sub(1, 1500))
         end)
     elseif a == "mobs" then
         -- every model in Enemies (also ones with no Humanoid) + map parts near us named like gem / crystal / orb / core

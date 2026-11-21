@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_93"
+local VERSION = "dq_95"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -21,6 +21,15 @@ if G.__dq_seq ~= SEQ then return end -- a newer copy started while we waited
 local LOBBY_PLACE = 11872917490
 local IN_LOBBY = (game.PlaceId == LOBBY_PLACE)
 local DIR = "dq"
+-- owner's PC with Volt multi-instance (11-21): a second account gets its own folder (log, cfg, cmd, state)
+-- so two copies never write over each other. Friends' devices have no dev.flag and keep "dq".
+pcall(function()
+    if isfile and isfile("dq/dev.flag") and LP.Name ~= "Exitta" then
+        DIR = "dq/acc_" .. tostring(LP.UserId)
+        if isfolder and not isfolder(DIR) then makefolder(DIR) end
+        if not isfile(DIR .. "/dev.flag") then writefile(DIR .. "/dev.flag", "") end
+    end
+end)
 
 local F = { alive = true, conns = {}, logLines = {} }
 local S = { -- live stats (this server only; totals kept in cfg)
@@ -1128,7 +1137,19 @@ local function hasFloor(p)
     end
     return false
 end
-local function okSpot(p) return not dangerAt(p) and hasFloor(p) end
+-- 11-21: two bots in one dungeon = one of them kicked #101 within ~30 s, every time (one bot + a hand player: never).
+-- Both bots CFrame-held onto the same spot over the same mob: the characters push each other apart (fling).
+-- Never stand within 8 studs of another player.
+local function crowded(p)
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LP and pl.Character then
+            local o = pl.Character:FindFirstChild("HumanoidRootPart")
+            if o and (o.Position - p).Magnitude < 8 then return true end
+        end
+    end
+    return false
+end
+local function okSpot(p) return not dangerAt(p) and hasFloor(p) and not crowded(p) end
 -- fall guard: remember the last spot with floor under it; if we end up far below it with nothing under us, go back
 do
     local lastSafe
@@ -1599,7 +1620,7 @@ local function bossSpot(e)
     local cur = S.bossCell
     if cur and cur.boss == e.m and now < cur.until_ then
         local p = cellPos(e.r, cur.ai, cur.ri, cur.hi)
-        if (okSpot(p) or not cfg.dodge) then
+        if ((okSpot(p) or not cfg.dodge) and not crowded(p)) then
             cur.stat.s = (cur.stat.s or 0) + (now - cur.t)
             cur.t = now
             return p
@@ -1618,7 +1639,7 @@ local function bossSpot(e)
         local st = stats[key] or { s = 0, h = 0 }
         stats[key] = st
         local p = cellPos(e.r, ai, ri, hi)
-        if (okSpot(p) or not cfg.dodge) and not (leave and cur.key == key) then
+        if ((okSpot(p) or not cfg.dodge) and not crowded(p)) and not (leave and cur.key == key) then
             local score = ((st.h or 0) + 0.5) / ((st.s or 0) + 3) + CELL_R[ri] * 0.002 + math.min(3, st.nd or 0) * 0.3
             if not bestScore or score < bestScore then best, bestScore = { ai = ai, ri = ri, hi = hi, key = key, stat = st }, score end
         end
@@ -1727,6 +1748,16 @@ local function engage(e)
     if hover > 0 then
         -- just behind the mob's centre and above its head; the swing hitbox (16 x 50 x 22) reaches down
         stand = tp + dir.Unit * 2 + Vector3.new(0, hover, 0)
+        -- another player (bot) already over this mob: take the other side, further out
+        if crowded(stand) then
+            for _, deg in ipairs({ 180, 90, 270, 45, 135, 225, 315 }) do
+                local a = math.rad(deg)
+                local u = dir.Unit
+                local rd = Vector3.new(u.X * math.cos(a) - u.Z * math.sin(a), 0, u.X * math.sin(a) + u.Z * math.cos(a))
+                local p = tp + rd * 9 + Vector3.new(0, hover, 0)
+                if not crowded(p) then stand = p break end
+            end
+        end
     else
         stand = tp + dir.Unit * (tonumber(cfg.standDist) or 4)
         stand = Vector3.new(stand.X, tp.Y, stand.Z)
@@ -2427,7 +2458,26 @@ local function onKick(msg)
             log("KICK report to Discord: " .. (ok and type(res) == "table" and tostring(res.StatusCode) or ("failed " .. tostring(res))))
         end)
 end
-S.onKick = onKick -- dev command "kicktest" posts a test report
+S.onKick = onKick
+-- evidence for the 2-bot kick (11-21): can two players physically push each other here?
+if DEV then task.spawn(function()
+    task.wait(3)
+    pcall(function()
+        local PS = game:GetService("PhysicsService")
+        local r = hrp()
+        local g = r and r.CollisionGroup or "?"
+        local others = {}
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LP and pl.Character and pl.Character:FindFirstChild("HumanoidRootPart") then
+                local og = pl.Character.HumanoidRootPart.CollisionGroup
+                others[#others + 1] = pl.Name .. ":" .. og .. " collides=" .. tostring(PS:CollisionGroupsAreCollidable(g, og)) .. " canCollide=" .. tostring(pl.Character.HumanoidRootPart.CanCollide)
+            end
+        end
+        local torso = r and r.Parent and (r.Parent:FindFirstChild("UpperTorso") or r.Parent:FindFirstChild("Torso"))
+        log("COLLCHECK me " .. g .. " self-collide=" .. tostring(PS:CollisionGroupsAreCollidable(g, g)) .. " hrpCanCollide=" .. tostring(r and r.CanCollide)
+            .. " torso " .. (torso and (torso.CollisionGroup .. " canCollide=" .. tostring(torso.CanCollide)) or "-") .. " | others: " .. table.concat(others, ", "))
+    end)
+end) end -- dev command "kicktest" posts a test report
 pcall(function() F.conns[#F.conns + 1] = game:GetService("GuiService").ErrorMessageChanged:Connect(onKick) end)
 -- fetch the Discord address early: after a kick the game may be too far gone to fetch it
 task.spawn(function()

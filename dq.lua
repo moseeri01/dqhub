@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_99"
+local VERSION = "dq_101"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1708,6 +1708,13 @@ local function engage(e)
                 return
             end
             S.dT0, S.dHp = now, e.h.Health
+        elseif not swingOn and now - S.dT0 > 8 and S.dHp - e.h.Health < e.h.MaxHealth * 0.002 then
+            -- 11-21 lvl 100: both bots stood still 26 s far from the Haste Tower (its spot red, no clear spot near it),
+            -- never in reach, so the check above never ran. 8 s on a target we cannot reach: skip it for 8 s.
+            S.decoy[e.m] = now + 8
+            log(string.format("UNREACHABLE %s for 8 s - hitting the others first", e.m.Name))
+            S.dTarget = nil
+            return
         end
     end
     -- safe zone up: we stay in it (dodgeCheck holds us there); hit whatever is in reach from inside
@@ -3013,8 +3020,10 @@ go("cmd", function()
 end)
 
 --------------------------------------------------------------------------------
--- pages
+-- pages (in their own function: Luau allows 200 locals per function and the whole script had 209 at the top -
+-- Volt took it, Delta did not run it at all, 11-21)
 --------------------------------------------------------------------------------
+;(function()
 local function set(key) return function(v) cfg[key] = v saveCfg() end end
 local function get(key) return function() return cfg[key] end end
 local function mapReq(name) for _, m in ipairs(MAP_REQ) do if m.map == name then return m.req end end return nil end
@@ -3196,6 +3205,7 @@ dots.MouseButton1Click:Connect(function() win.Visible = false end)
 
 gui.Parent = guiParent
 UI.show("Farm")
+end)()
 
 go("ui", function()
     while F.alive do

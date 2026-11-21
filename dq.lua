@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_86"
+local VERSION = "dq_87"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -672,7 +672,7 @@ local function pickTarget()
         if cfg.bossFirst then score = score - e.h.MaxHealth / 50 end -- big hp pool = boss = first
         -- orbs / gems / totems next to a boss (Sunken Fortress: Barbed Orb Sentry beside Fortress Shaman, 11-21 one-hit death): before the boss
         local nm = e.m.Name:lower()
-        if nm:find("orb") or nm:find("sentry") or nm:find("crystal") or nm:find("gem") or nm:find("totem") or nm:find("pylon") then score = score - 2000 end
+        if nm:find("orb") or nm:find("sentry") or nm:find("crystal") or nm:find("gem") or nm:find("totem") or nm:find("pylon") or nm:find("statue") or nm:find("powered") or nm:find("pillar") or nm:find("generator") or nm:find("obelisk") then score = score - 2000 end
         -- healers first of all: Fortress Shaman carries a "heal" Beam (dq mobs scan 11-21) and keeps the others alive
         if e.m:FindFirstChild("heal") or nm:find("shaman") or nm:find("cleric") or nm:find("healer") then score = score - 3000 end
         -- the game marks real bosses with attribute Boss = true (seen on Blightwyrm): those first among big mobs
@@ -1623,12 +1623,12 @@ local function engage(e)
         local now = os.clock()
         S.decoy = S.decoy or {}
         if S.dTarget ~= e.m then S.dTarget, S.dT0, S.dHp = e.m, now, e.h.Health
-        elseif swingOn and now - S.dT0 > 6 then
+        elseif swingOn and now - S.dT0 > 2.5 then -- 11-21 owner: 6 s was slow to leave an immune boss
             if e.h.Health >= S.dHp - 1 then
                 S.decoy[e.m] = now + 20
                 S.decoyHp = S.decoyHp or setmetatable({}, { __mode = "k" })
                 S.decoyHp[e.m] = e.h.Health
-                log(string.format("DECOY? %s hp %.0f did not drop in 6 s of hitting - trying another target", e.m.Name, e.h.Health))
+                log(string.format("IMMUNE %s hp %.0f did not drop in 2.5 s of hitting - hitting the others first", e.m.Name, e.h.Health))
                 S.dTarget = nil
                 return
             end

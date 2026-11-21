@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_49"
+local VERSION = "dq_50"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1651,7 +1651,12 @@ local function playing(manual)
         return mode, cfg.modeTier[mode] or MODE_TIERS[mode][1][1]
     end
     if cfg.autoBest and not manual then local m, d = bestDungeon() return m, d end
-    return cfg.map, cfg.difficulty
+    -- the server would not start the hand-picked difficulty (RV Calamity was refused all afternoon): one step easier
+    local d = cfg.difficulty
+    local idx = 1
+    for i, x in ipairs(DIFFS) do if x == d then idx = i end end
+    while idx > 1 and S.refused[cfg.map .. "|" .. DIFFS[idx]] do idx = idx - 1 end
+    return cfg.map, DIFFS[idx]
 end
 
 --------------------------------------------------------------------------------
@@ -1788,6 +1793,12 @@ local menuTries, menuLast = 0, 0
 local function menuStep()
     local ls = pgui("LoadingScreen")
     if not ls or not ls.Enabled then return false end
+    -- the LoadingScreen gui can stay enabled after the character is in; only its Menu frame being shown counts
+    -- (dq_49 kept "picking a slot" while already standing in the lobby - each pick moves us to another server)
+    local menu = ls:FindFirstChild("Menu")
+    if not menu or not shown(menu) then return false end
+    local c = LP.Character
+    if c and c:FindFirstChild("HumanoidRootPart") and LP:GetAttribute("loaded") == true and not shown(menu) then return false end
     S.phase = "menu"
     local failed = false
     pcall(function()
@@ -1837,7 +1848,7 @@ local function lobbyTick()
     if S.tries[key] > 4 then
         S.refused[key] = true
         log("PlaySolo " .. key .. " refused 4 times - skipping it" .. (cfg.autoBest and "" or " (manual pick: change map/difficulty)"))
-        if not cfg.autoBest then cfg.farm = false saveCfg() end
+        -- (no more farm OFF here: a hand-picked dungeon the server keeps refusing steps down one difficulty, see playing())
         return
     end
     local t = { Map = map, Calamity = false, Hardcore = hc, NoHit = false,

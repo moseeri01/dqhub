@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_89"
+local VERSION = "dq_90"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1266,7 +1266,10 @@ local function dodgeCheck()
     if not cfg.dodge and not cfg.dodgeLight then return false end
     local r = hrp()
     if not r then return false end
-    if os.clock() - lastDodge < 0.25 then return false end
+    -- 11-21 DQKICK: a friend (not the party host) got #101 after 40 dodges in 27 s, 20-50 studs each. The host never does,
+    -- so in a party: at most one dodge a second and only short ones (25 studs); otherwise stay and take the hit.
+    local party = not IN_LOBBY and #Players:GetPlayers() > 1
+    if os.clock() - lastDodge < (party and 1.0 or 0.25) then return false end
     local zone = dangerAt(r.Position)
     -- Light: let small zones hit us, leave only the big area attacks
     if zone and not zoneWorthDodging(zone) then
@@ -1286,6 +1289,7 @@ local function dodgeCheck()
             if os.clock() - (S.noSpotT or 0) > 3 then S.noSpotT = os.clock() log(string.format("DODGE no clear spot with floor near %s (zone %s %.0fx%.0fx%.0f)", v3s(r.Position), zone.Name, zone.Size.X, zone.Size.Y, zone.Size.Z)) end
             return false
         end
+        if party and (to - r.Position).Magnitude > 25 then return false end
         lastDodge = os.clock()
         local look = (curTarget and curTarget.Parent) and curTarget.Position or (to + r.CFrame.LookVector)
         -- never one instant jump of more than 40 studs (anti-cheat #101): longer dodges go in steps

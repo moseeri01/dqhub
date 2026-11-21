@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_88"
+local VERSION = "dq_89"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -2332,14 +2332,43 @@ end
 --------------------------------------------------------------------------------
 -- any kick / disconnect (game anti-cheat #101 too): keep the last 150 log lines in dq/lastkick.txt on every device,
 -- so a friend can send the file (11-21: a friend dropped with #101 only in party runs, and friends keep no log file)
-pcall(function()
-    F.conns[#F.conns + 1] = game:GetService("GuiService").ErrorMessageChanged:Connect(function(msg)
+local function onKick(msg)
         if not msg or msg == "" then return end
         local L = F.logLines
         local out = { os.date("%Y-%m-%d %H:%M:%S") .. " " .. VERSION .. " place " .. tostring(game.PlaceId) .. " players " .. #Players:GetPlayers(), "message: " .. msg }
         for i = math.max(1, #L - 149), #L do out[#out + 1] = L[i] end
         pcall(function() if not isfolder(DIR) then makefolder(DIR) end writefile(DIR .. "/lastkick.txt", table.concat(out, "\n")) end)
-    end)
+        -- and post it to the owner's Discord data channel like AA does (owner 11-21: "no need for friends to open files").
+        -- One "DQKICK" message per kick; the AA stats bot reads only AASTAT / AAITEM / AABR lines, so it skips these.
+        if S.kickSent then return end
+        S.kickSent = true
+        task.spawn(function()
+            local url = S.shareUrl
+            if not url then
+                local ok, u = pcall(function() return game:HttpGet("https://raw.githubusercontent.com/moseeri01/blueheater2/main/share_url.txt") end)
+                url = ok and type(u) == "string" and u:match("https://[%w%./_%-]+") or nil
+            end
+            local req = (syn and syn.request) or (http and http.request) or request or http_request
+            if not url or type(req) ~= "function" then return end
+            local tail = {}
+            for i = #L, 1, -1 do
+                local s = L[i]
+                if not (s:find(" PREDODGE ") or s:find(" NEWOBJ ") or s:find(" TARGET ")) then table.insert(tail, 1, s:sub(1, 160)) end
+                if #tail >= 25 then break end
+            end
+            local body = "DQKICK " .. VERSION .. " id " .. tostring(LP.UserId % 100000) .. " | " .. msg:sub(1, 120)
+                .. " | place " .. tostring(game.PlaceId) .. " players " .. #Players:GetPlayers() .. "\n```\n" .. table.concat(tail, "\n")
+            body = body:sub(1, 1890) .. "\n```"
+            local ok, res = pcall(req, { Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode({ content = body }) })
+            log("KICK report to Discord: " .. (ok and type(res) == "table" and tostring(res.StatusCode) or ("failed " .. tostring(res))))
+        end)
+end
+S.onKick = onKick -- dev command "kicktest" posts a test report
+pcall(function() F.conns[#F.conns + 1] = game:GetService("GuiService").ErrorMessageChanged:Connect(onKick) end)
+-- fetch the Discord address early: after a kick the game may be too far gone to fetch it
+task.spawn(function()
+    local ok, u = pcall(function() return game:HttpGet("https://raw.githubusercontent.com/moseeri01/blueheater2/main/share_url.txt") end)
+    S.shareUrl = ok and type(u) == "string" and u:match("https://[%w%./_%-]+") or nil
 end)
 local Safe = MSafe.start({ name = "moseeri dungeon", onLog = log, onStuck = function() toLobby() end,
     stuckMin = tonumber(cfg.stuckMin) or 3,
@@ -2756,6 +2785,7 @@ local function runCmd(line)
             pcall(function() writefile(DIR .. "/inv.txt", table.concat(out, "\n")) end)
             log("INV -> dq/inv.txt")
         end)
+    elseif a == "kicktest" then S.kickSent = nil if S.onKick then S.onKick("TEST report, not a real kick") end
     elseif a == "eval" then
         -- dev only: run one Lua line and log what it returns (cmd.txt is read only when dq/dev.flag exists)
         go("eval", function()

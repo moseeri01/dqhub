@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_38"
+local VERSION = "dq_47"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -31,12 +31,28 @@ local S = { -- live stats (this server only; totals kept in cfg)
 local function ensureFolder() pcall(function() if isfolder and not isfolder(DIR) then makefolder(DIR) end end) end
 ensureFolder()
 
+-- DEV = the owner's PC (dq/dev.flag). Friends (Delta on phones) got load time + lag from file writes:
+-- there the log stays in memory only (Log tab), no state file, no command file polling.
+local DEV = false
+pcall(function() DEV = isfile and isfile(DIR .. "/dev.flag") or false end)
+local logBuf = {}
 local function log(msg)
     local line = os.date("%H:%M:%S") .. " " .. tostring(msg)
     table.insert(F.logLines, line)
     if #F.logLines > 60 then table.remove(F.logLines, 1) end
-    pcall(function() appendfile(DIR .. "/log.txt", line .. "\n") end)
+    if DEV then logBuf[#logBuf + 1] = line end
 end
+-- one file write every 3 s instead of one per line
+task.spawn(function()
+    while F.alive do
+        task.wait(3)
+        if #logBuf > 0 then
+            local chunk = table.concat(logBuf, "\n") .. "\n"
+            logBuf = {}
+            pcall(function() appendfile(DIR .. "/log.txt", chunk) end)
+        end
+    end
+end)
 
 -- every thread goes through go(): one uncaught error is never left to the game's error reporter
 local function go(name, fn, ...)
@@ -55,7 +71,7 @@ local DEFAULT = {
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
     autoBest = true, retry = true, dodge = true,
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
-    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, dangerAnims = {}, bossCells = {}, timingLog = false, mode = "Dungeons", modeTier = {}, recordRoute = false,
+    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, dangerAnims = {}, bossCells = {}, mobHeight = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
 }
 local cfg = {}
@@ -362,7 +378,11 @@ function UI.dropdown(card, text, height, getItems, getKey, onPick)
         arrow.Text = on and "^" or "v"
         if UI.current then UI.show(UI.current) end      -- the window height follows
     end
+    local lastKey = {}
     paint = function()
+        -- closed and nothing picked since last time: skip rebuilding the list (ran every second, heavy on phones)
+        if not sf.Visible and sig ~= "" and getKey() == lastKey then return end
+        lastKey = getKey()
         local items = getItems()
         local cur = getKey()
         local s = {}
@@ -749,9 +769,8 @@ end)
 local dangers = {} -- part -> born time
 local function isDanger(p)
     if not p:IsA("BasePart") then return false end
-    -- Deadly* = Zyrtas whirl / vortex pools (seen 11-21); SafeZone* is the opposite and handled apart
-    local deadly = p.Name:sub(1, 6) == "Deadly"
-    if p.Name ~= "Hitbox" and p.Name ~= "Indicator" and not deadly then return false end
+    -- (DeadlyWhirl / DeadlyVortex are OUR spells - they appear on us when Q/E is used; not dangers. 11-21 14:03)
+    if p.Name ~= "Hitbox" and p.Name ~= "Indicator" then return false end
     -- players' own skills carry OwnerUserId (our Q made 30x30 Hitboxes: 1206 dodges from our own skills on 11-21)
     if p:GetAttribute("OwnerUserId") ~= nil or (p.Parent and p.Parent:GetAttribute("OwnerUserId") ~= nil) then return false end
     local c = char()
@@ -804,7 +823,7 @@ local function liveDangers()
     if now - liveAt < 0.05 then return liveCache end
     local out = {}
     for p, t in pairs(dangers) do
-        if not p.Parent or (now - t > 15 and p.Name:sub(1, 6) ~= "Deadly") then dangers[p] = nil else out[#out + 1] = p end
+        if not p.Parent or now - t > 15 then dangers[p] = nil else out[#out + 1] = p end
     end
     liveCache, liveAt = out, now
     return out
@@ -827,6 +846,49 @@ local function dangerAt(pos)
     for _, p in ipairs(liveDangers()) do if inZone(pos, p) then return p end end
     return nil
 end
+
+-- 11-21: dodging to a spot over a cliff dropped us off the map. A spot needs solid floor within 80 studs below.
+local floorParams = RaycastParams.new()
+floorParams.FilterType = Enum.RaycastFilterType.Exclude
+local function hasFloor(p)
+    local ex = { workspace:FindFirstChild("Enemies"), workspace:FindFirstChild("Waste") }
+    for _, pl in ipairs(Players:GetPlayers()) do if pl.Character then ex[#ex + 1] = pl.Character end end
+    floorParams.FilterDescendantsInstances = ex
+    local hit = workspace:Raycast(p + Vector3.new(0, 2, 0), Vector3.new(0, -80, 0), floorParams)
+    for _ = 1, 10 do
+        if not hit then return false end
+        if hit.Instance.CanCollide or hit.Instance:IsA("Terrain") then return true end
+        -- see-through effect parts (zones, beams): look below them
+        hit = workspace:Raycast(hit.Position - Vector3.new(0, 0.1, 0), Vector3.new(0, -80, 0), floorParams)
+    end
+    return false
+end
+local function okSpot(p) return not dangerAt(p) and hasFloor(p) end
+-- fall guard: remember the last spot with floor under it; if we end up far below it with nothing under us, go back
+do
+    local lastSafe
+    go("fallguard", function()
+        while F.alive do
+            task.wait(0.3)
+            if cfg.farm and not IN_LOBBY and not S.runCleared then
+                local r = hrp()
+                local h = hum()
+                if r and h and h.Health > 0 then
+                    -- a real fall only: dropping fast (our own teleports zero the speed) with no floor under us
+                    -- (dq_40 pulled us up again and again when we teleported down to a mob on a lower floor)
+                    local falling = r.AssemblyLinearVelocity.Y < -60
+                    if not falling and hasFloor(r.Position) then
+                        lastSafe = r.Position
+                    elseif falling and lastSafe and r.Position.Y < lastSafe.Y - 30 and not hasFloor(r.Position) then
+                        log(string.format("FALL at %s - back to %s", v3s(r.Position), v3s(lastSafe)))
+                        hold = nil
+                        setCF(CFrame.new(lastSafe + Vector3.new(0, 3, 0)))
+                    end
+                end
+            end
+        end
+    end)
+end
 -- owner 11-21: step to the side of the skill and keep hitting, don't run away.
 -- 1) a clear spot 5-11 studs from the mob we fight (still in swing reach), the one closest to us;
 -- 2) else a clear spot near us; 3) else the map start / high above.
@@ -838,9 +900,9 @@ local function sideSpot(from)
         for _, rad in ipairs({ 5, 8, 11 }) do
             for k = 0, 15 do
                 local a = k * math.pi / 8
-                local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) or 0 -- stay up: melee swings miss us
+                local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and (tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 24) or 24) or 0 -- stay up: melee swings miss us
                 local p = Vector3.new(tp.X + math.cos(a) * rad, tp.Y + hov, tp.Z + math.sin(a) * rad)
-                if not dangerAt(p) then
+                if okSpot(p) then
                     local dd = (p - from).Magnitude
                     if not bestD or dd < bestD then best, bestD = p, dd end
                 end
@@ -859,13 +921,13 @@ local function safeSpot(from, zone)
     if s then return s end
     if curTarget and curTarget.Parent then
         local tp = curTarget.Position
-        local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) or 0
+        local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and (tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 24) or 24) or 0
         local best, bestD
         for _, rad in ipairs({ 14, 18, 22 }) do
             for k = 0, 15 do
                 local a = k * math.pi / 8
                 local p = Vector3.new(tp.X + math.cos(a) * rad, tp.Y + hov, tp.Z + math.sin(a) * rad)
-                if not dangerAt(p) then
+                if okSpot(p) then
                     local dd = (p - from).Magnitude
                     if not bestD or dd < bestD then best, bestD = p, dd end
                 end
@@ -873,12 +935,12 @@ local function safeSpot(from, zone)
             if best then return best end
         end
     end
-    if zone and math.max(zone.Size.X, zone.Size.Y, zone.Size.Z) <= 60 then return nil end
+    -- no clear spot in reach: get out anyway (11-21 Cursed Marshes: stayed in a 50-wide zone and took -2040)
     for _, rad in ipairs({ 8, 14, 22, 32, 45, 60, 80, 110, 140, 180, 230 }) do
         for k = 0, 11 do
             local a = k * math.pi / 6
             local p = from + Vector3.new(math.cos(a) * rad, 0, math.sin(a) * rad)
-            if not dangerAt(p) then return p end
+            if okSpot(p) then return p end
         end
     end
     -- nowhere clear within 110 studs: stay and keep hitting (the old jump to the map start bounced us
@@ -916,6 +978,33 @@ local function safeZone()
     return Vector3.new(p.Position.X, y, p.Position.Z), p
 end
 S.safeGo = 0
+-- new things in the dungeon (boss mechanics like rune rings): log each new name once with class, size, children
+do
+    local known, seenNew = { Hitbox = true, Indicator = true, Part = true, Warrior = true, SwingHitboxAgony = true, Sword = true,
+        DeadlyWhirl = true, DeadlyVortex = true, DropEffectPart = true, CoinEffectPart = true, SpikeParticles = true }
+    seenNew = {}
+    F.conns[#F.conns + 1] = workspace.ChildAdded:Connect(function(o)
+        if not DEV or IN_LOBBY or known[o.Name] or seenNew[o.Name] then return end
+        if Players:FindFirstChild(o.Name) then return end
+        seenNew[o.Name] = true
+        task.delay(0.3, function()
+            pcall(function()
+                local kids, n = {}, 0
+                for _, d in ipairs(o:GetDescendants()) do
+                    n = n + 1
+                    if #kids < 10 and (d:IsA("BillboardGui") or d:IsA("ImageLabel") or d:IsA("Decal") or d:IsA("BasePart") or d:IsA("Beam") or d:IsA("ParticleEmitter")) then
+                        kids[#kids + 1] = d.Name .. ":" .. d.ClassName .. ((d:IsA("ImageLabel") or d:IsA("Decal")) and ("=" .. tostring(d.Image or d.Texture)) or "")
+                    end
+                end
+                local p = o:IsA("BasePart") and o or (o:IsA("Model") and o:FindFirstChildWhichIsA("BasePart", true))
+                local r = hrp()
+                log(string.format("NEWOBJ %s (%s)%s%s | %d parts: %s", o.Name, o.ClassName,
+                    p and string.format(" size %.0fx%.0fx%.0f", p.Size.X, p.Size.Y, p.Size.Z) or "",
+                    (p and r) and string.format(" %.0f studs", (p.Position - r.Position).Magnitude) or "", n, table.concat(kids, ",")))
+            end)
+        end)
+    end)
+end
 S.dodges = 0
 local lastDodge = 0
 local function dodgeCheck()
@@ -945,7 +1034,10 @@ local function dodgeCheck()
                 os.clock() - (dangers[zone] or os.clock())))
         end
         local to = safeSpot(r.Position, zone)
-        if not to then return false end
+        if not to then
+            if os.clock() - (S.noSpotT or 0) > 3 then S.noSpotT = os.clock() log(string.format("DODGE no clear spot with floor near %s (zone %s %.0fx%.0fx%.0f)", v3s(r.Position), zone.Name, zone.Size.X, zone.Size.Y, zone.Size.Z)) end
+            return false
+        end
         lastDodge = os.clock()
         local look = (curTarget and curTarget.Parent) and curTarget.Position or (to + r.CFrame.LookVector)
         setCF(faceCF(to, look)) -- face the mob: the swing loop keeps hitting from the side
@@ -955,8 +1047,16 @@ local function dodgeCheck()
     end
     return false
 end
+-- 10 checks a second is enough (every frame was 60 a second, heavy on phones)
+local lastDodgeCheck = 0
 F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
-    if cfg.farm and not S.limitBusy then pcall(dodgeCheck) end
+    local now = os.clock()
+    if now - lastDodgeCheck < 0.1 then return end
+    lastDodgeCheck = now
+    if cfg.farm and not S.limitBusy then
+        local ok, err = pcall(dodgeCheck)
+        if not ok and os.clock() - (S.dodgeErrT or 0) > 10 then S.dodgeErrT = os.clock() log("ERR dodge: " .. tostring(err)) end
+    end
 end)
 -- what hit us: nearest mob (and how high we are over it) + any red zone we stand in or next to
 local function hitWhy()
@@ -1042,7 +1142,7 @@ do
     if bn then
         F.conns[#F.conns + 1] = bn.OnClientEvent:Connect(function(buf, refs)
             pcall(function()
-                if typeof(buf) ~= "buffer" or type(refs) ~= "table" then return end
+                if IN_LOBBY or not cfg.farm or typeof(buf) ~= "buffer" or type(refs) ~= "table" then return end
                 local kind = buffer.len(buf) > 0 and buffer.readu8(buf, 0) or -1
                 local id = "bn" .. tostring(kind)
                 local folder = workspace:FindFirstChild("Enemies")
@@ -1069,7 +1169,7 @@ do
             end)
         end)
     end
-    go("learnsave", function() while F.alive do task.wait(30) saveCfg() end end)
+    go("learnsave", function() while F.alive do task.wait(DEV and 30 or 120) saveCfg() end end)
 end
 local function learnHit(dmg, maxHp)
     if dmg < maxHp * 0.03 then return "" end
@@ -1131,15 +1231,40 @@ end
 -- x 2 heights. Each spot keeps seconds spent and hits taken there (cfg.bossCells[boss][spot], kept across runs);
 -- we fight from the spot with the fewest hits per second, and move at once when a spot gets hit.
 --------------------------------------------------------------------------------
-local CELL_R, CELL_H = { 6, 12, 17 }, { 10, 18, 26 }
+local CELL_R, CELL_H = { 6, 12, 17 }, { 1 } -- one height: the learned one below
 local function ddNow() local p = LP:FindFirstChild("dungPerformance") local v = p and p:FindFirstChild("damageDone") return v and v.Value or 0 end
+--------------------------------------------------------------------------------
+-- learned fight height (method change 11-21, from 30 min of boss-spot data: hits per minute 5.3 at +10,
+-- 4.8 at +18, 2.1 at +26 - most damage boxes are only 30-50 tall - but +26 often could not reach the mob).
+-- Per mob name: start at +24; 1.5 s of swinging with no damage -> 4 lower (min 6); damage for 15 s -> try 3 higher
+-- (max 34). Kept across runs in cfg.mobHeight.
+--------------------------------------------------------------------------------
+local function heightFor(name) return tonumber(cfg.mobHeight[name]) or 24 end
+local HT = {}
+local function heightTick(e)
+    local now, name = os.clock(), e.m.Name
+    if HT.name ~= name then HT.name, HT.t0, HT.dd0, HT.okSince = name, now, ddNow(), nil return end
+    if now - HT.t0 < 1.5 then return end
+    local h = heightFor(name)
+    if ddNow() > HT.dd0 then
+        HT.okSince = HT.okSince or now
+        if now - HT.okSince > 15 and h < 34 then
+            cfg.mobHeight[name] = h + 3 HT.okSince = now
+            log(string.format("HEIGHT %s -> %d (hitting fine, trying higher)", name, h + 3))
+        end
+    elseif swingOn and h > 6 then
+        cfg.mobHeight[name] = math.max(6, h - 4) HT.okSince = nil
+        log(string.format("HEIGHT %s -> %d (no damage at %d)", name, cfg.mobHeight[name], h))
+    end
+    HT.t0, HT.dd0 = now, ddNow()
+end
 local function cellPos(root, ai, ri, hi)
     local look = flat(root.CFrame.LookVector)
     if look.Magnitude < 0.1 then look = Vector3.new(0, 0, -1) end
     look = look.Unit
     local a = (ai - 1) * math.pi / 4
     local dir = Vector3.new(look.X * math.cos(a) - look.Z * math.sin(a), 0, look.X * math.sin(a) + look.Z * math.cos(a))
-    return root.Position + dir * CELL_R[ri] + Vector3.new(0, CELL_H[hi], 0)
+    return root.Position + dir * CELL_R[ri] + Vector3.new(0, heightFor(root.Parent and root.Parent.Name or "?"), 0)
 end
 local function bossSpot(e)
     local now = os.clock()
@@ -1149,7 +1274,7 @@ local function bossSpot(e)
     local cur = S.bossCell
     if cur and cur.boss == e.m and now < cur.until_ then
         local p = cellPos(e.r, cur.ai, cur.ri, cur.hi)
-        if not (cfg.dodge and dangerAt(p)) then
+        if (okSpot(p) or not cfg.dodge) then
             cur.stat.s = (cur.stat.s or 0) + (now - cur.t)
             cur.t = now
             return p
@@ -1168,7 +1293,7 @@ local function bossSpot(e)
         local st = stats[key] or { s = 0, h = 0 }
         stats[key] = st
         local p = cellPos(e.r, ai, ri, hi)
-        if not (cfg.dodge and dangerAt(p)) and not (leave and cur.key == key) then
+        if (okSpot(p) or not cfg.dodge) and not (leave and cur.key == key) then
             local score = ((st.h or 0) + 0.5) / ((st.s or 0) + 3) + CELL_R[ri] * 0.002 + math.min(3, st.nd or 0) * 0.3
             if not bestScore or score < bestScore then best, bestScore = { ai = ai, ri = ri, hi = hi, key = key, stat = st }, score end
         end
@@ -1177,7 +1302,8 @@ local function bossSpot(e)
     best.boss, best.t, best.until_ = e.m, now, now + 2.5
     best.t0, best.dd0 = now, ddNow()
     if not cur or cur.key ~= best.key then
-        log(string.format("BOSS SPOT %s: dir %d dist %d up %d (hits %.1f in %.0fs there)", name, best.ai, CELL_R[best.ri], CELL_H[best.hi], best.stat.h or 0, best.stat.s or 0))
+        if os.clock() - (S.spotLogT or 0) > 10 then S.spotLogT = os.clock() else best.quiet = true end
+        if not best.quiet then log(string.format("BOSS SPOT %s: dir %d dist %d up %s (hits %.1f in %.0fs there)", name, best.ai, CELL_R[best.ri], "learned", best.stat.h or 0, best.stat.s or 0)) end
     end
     S.bossCell = best
     return cellPos(e.r, best.ai, best.ri, best.hi)
@@ -1192,7 +1318,7 @@ local function outside(root, radius)
     for _, off in ipairs({ 0, 0.5, -0.5, 1, -1, 1.6, -1.6, 2.4, -2.4, math.pi }) do
         local a = base + off
         local p = Vector3.new(root.Position.X + math.cos(a) * radius, r.Position.Y, root.Position.Z + math.sin(a) * radius)
-        if not dangerAt(p) then return p end
+        if okSpot(p) then return p end
     end
     return nil
 end
@@ -1219,7 +1345,8 @@ local function engage(e)
         if p then
             if (r.Position - p).Magnitude > 3 then moveTo(p, e.r.Position) end
             hold = { cf = CFrame.lookAt(p, e.r.Position), t = os.clock() }
-            swingOn = (p - e.r.Position).Magnitude < 26
+            swingOn = (p - e.r.Position).Magnitude < 40
+            heightTick(e)
             if swingOn and cfg.autoQE then
                 if castReady("Q") then cast("Q") end
                 if castReady("E") then cast("E") end
@@ -1247,7 +1374,8 @@ local function engage(e)
     local tp = e.r.Position
     local dir = flat(r.Position) - flat(tp)
     if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, 1) end
-    local hover = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) or 0
+    -- hover > 0 = hover on; how high is learned per mob (heightFor)
+    local hover = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and heightFor(e.m.Name) or 0
     local stand
     if hover > 0 then
         -- just behind the mob's centre and above its head; the swing hitbox (16 x 50 x 22) reaches down
@@ -1269,7 +1397,7 @@ local function engage(e)
                 for k = 0, 15 do
                     local a = k * math.pi / 8
                     local p = Vector3.new(tp.X + math.cos(a) * rad, tp.Y + hover, tp.Z + math.sin(a) * rad)
-                    if not dangerAt(p) and (not alt or (p - r.Position).Magnitude < (alt - r.Position).Magnitude) then alt = p end
+                    if okSpot(p) and (not alt or (p - r.Position).Magnitude < (alt - r.Position).Magnitude) then alt = p end
                 end
                 if alt then break end
             end
@@ -1291,6 +1419,7 @@ local function engage(e)
     end
     local d = r and (flat(r.Position) - flat(tp)).Magnitude or 99
     swingOn = d < 14
+    if hover > 0 then heightTick(e) end
     if swingOn and cfg.autoQE then
         if castReady("Q") then cast("Q") end
         if castReady("E") then cast("E") end
@@ -1381,7 +1510,7 @@ local function dungeonTick()
         if os.clock() - endSeen > 4 and not S.jobsRunning then
             -- the screen has two copies of Retry / Return (CompletionMain and a smaller panel): take a shown one
             -- after a death never Retry the same dungeon (11-21: Retry looped Sunken Fortress twice into death)
-            local want = (cfg.retry and (not S.diedThisRun or #Players:GetPlayers() > 1)) and "Retry" or "Return"
+            local want = (cfg.retry and not S.needSell and (not S.diedThisRun or #Players:GetPlayers() > 1)) and "Retry" or "Return"
             local btn, seen = nil, {}
             local root = pgui("CompletionScreen")
             for _, d in ipairs(root and root:GetDescendants() or {}) do
@@ -1546,13 +1675,54 @@ local function sellList()
     return list, n
 end
 local function countSell() local _, n = sellList() sellInfo.matches = tostring(n) .. " items" return n end
+-- inventory snapshot: item count + which GUIDs are worn (to check that equip / sell really did something)
+local function invSnap()
+    local inv = R("getInventory") and R("getInventory"):InvokeServer(LP.UserId)
+    local n, eq = 0, {}
+    for _, ty in ipairs(TYPES) do
+        if type(inv) == "table" and type(inv[ty]) == "table" then
+            for _, it in pairs(inv[ty]) do
+                n = n + 1
+                if it.equipped == true or it.equippedE == true or it.equippedQ == true then eq[#eq + 1] = tostring(it.GUID) end
+            end
+        end
+    end
+    table.sort(eq)
+    return { n = n, eq = table.concat(eq, ","), eqn = #eq, inv = inv }
+end
 local function sellNow()
     local list, n = sellList()
     if not list or n == 0 then sellInfo.matches = "0 items" log("SELL nothing to sell") return end
+    local before = invSnap()
     local ok = R("sellItems"):InvokeServer(list)
-    sellInfo.last = os.date("%H:%M") .. " · " .. n .. " items" .. (ok and "" or " (refused)")
+    task.wait(1)
+    local after = invSnap()
+    -- one big call came back nil in a dungeon (11-21 13:33, 63 items): if nothing went, try one item type at a time
+    if after.n >= before.n then
+        log(string.format("SELL all at once -> %s, items %d -> %d: trying type by type", tostring(ok), before.n, after.n))
+        for _, ty in ipairs(TYPES) do
+            if #list[ty] > 0 then
+                local one = { weapons = {}, armors = {}, helmets = {}, legs = {}, spells = {}, rings = {}, sigils = {} }
+                one[ty] = list[ty]
+                local r = R("sellItems"):InvokeServer(one)
+                log("SELL " .. ty .. " x" .. #list[ty] .. " -> " .. tostring(r))
+                task.wait(0.5)
+            end
+        end
+        task.wait(1)
+        after = invSnap()
+    end
+    sellInfo.last = os.date("%H:%M") .. string.format(" · %d -> %d items", before.n, after.n) .. (IN_LOBBY and "" or " (dungeon)")
     sellInfo.matches = "0 items"
-    log("SELL " .. n .. " items -> " .. tostring(ok))
+    log(string.format("SELL %d picked, inventory %d -> %d (%s)", n, before.n, after.n, IN_LOBBY and "lobby" or "dungeon"))
+end
+local function equipBest()
+    if not R("EquipBest") then return end
+    local before = invSnap()
+    R("EquipBest"):FireServer()
+    task.wait(1.5)
+    local after = invSnap()
+    log(string.format("EQUIP BEST (%s): worn %d items, %s", IN_LOBBY and "lobby" or "dungeon", after.eqn, before.eq == after.eq and "no change" or "CHANGED"))
 end
 
 --------------------------------------------------------------------------------
@@ -1564,8 +1734,18 @@ local function lobbyJobs()
         local free = num(data:FindFirstChild("freeSP"))
         if free > 0 then R("addSkillPoints"):FireServer(cfg.spStat, free) log("SKILL +" .. free .. " " .. cfg.spStat) task.wait(1) end
     end
-    if cfg.autoEquipBest and R("EquipBest") then R("EquipBest"):FireServer() log("EQUIP BEST") task.wait(1) end
-    if cfg.autoSell then pcall(sellNow) task.wait(1) end
+    if cfg.autoEquipBest then pcall(equipBest) end
+    if cfg.autoSell then
+        if IN_LOBBY then pcall(sellNow) task.wait(1) S.needSell = false
+        else
+            -- the server only sells in the lobby: when the bag is this full, this run ends in the lobby
+            local ok, snap = pcall(invSnap)
+            if ok and snap.n >= (tonumber(cfg.sellAt) or 80) then
+                S.needSell = true
+                log(string.format("BAG %d items (sell at %d) - this run goes to the lobby to sell", snap.n, tonumber(cfg.sellAt) or 80))
+            end
+        end
+    end
     if cfg.autoDaily and R("ClaimDaily") then
         -- the same call as walking into the daily rewards zone; only when a day has passed (lastDaily = unix time)
         local last = tonumber(LP:GetAttribute("lastDaily")) or 0
@@ -1613,7 +1793,10 @@ local function menuStep()
         if os.clock() - menuLast > 20 then menuLast = os.clock() log("MENU could not load the character -> rejoin lobby") toLobby() end
         return true
     end
-    if os.clock() - menuLast > 15 then
+    -- the game's own Play button fires ONCE and then shows LOADING... (the server teleports us). Firing again while that
+    -- teleport runs looks like what hung the loading screen (11-21 13:58: two picks 15 s apart, then stuck). Once, then 60 s.
+    if LP:GetAttribute("IsTeleporting") == true then S.target = "teleporting..." return true end
+    if os.clock() - menuLast > (menuTries == 0 and 3 or 60) then
         menuLast = os.clock()
         menuTries = menuTries + 1
         local slot = tonumber(LP:GetAttribute("ActiveCharacterSlot")) or 1
@@ -1667,7 +1850,7 @@ local function lobbyTick()
             end
         end
         log("  state: " .. table.concat(a, " "))
-        if not S.lobbyEars then
+        if DEV and not S.lobbyEars then
             S.lobbyEars = true
             for _, rem in ipairs(RS:GetChildren()) do
                 if rem:IsA("RemoteEvent") and rem.Name ~= "ByteNetReliable" and rem.Name ~= "ByteNetUnreliable" then
@@ -1869,6 +2052,30 @@ local function runCmd(line)
         cfg[b] = v saveCfg()
     elseif a == "return" then local rl = R("ReturnLobby") if rl then rl:FireServer() end
     elseif a == "lobby" then toLobby()
+    elseif a == "jobs" then go("jobs", lobbyJobs)
+    elseif a == "sell" then go("sell", sellNow)
+    elseif a == "inv" then
+        go("inv", function()
+            local s = invSnap()
+            local out = { os.date("%H:%M:%S") .. " inventory " .. s.n .. " items, worn " .. s.eqn .. (IN_LOBBY and " (lobby)" or " (dungeon)") }
+            for _, ty in ipairs(TYPES) do
+                local list = type(s.inv) == "table" and s.inv[ty]
+                if type(list) == "table" then
+                    local k = 0
+                    for _, it in pairs(list) do
+                        k = k + 1
+                        if k <= 6 or it.equipped == true then
+                            local f = {}
+                            for key, v in pairs(it) do if type(v) ~= "table" then f[#f + 1] = key .. "=" .. tostring(v) else f[#f + 1] = key .. "={..}" end end
+                            table.sort(f)
+                            out[#out + 1] = ty .. " | " .. table.concat(f, " ")
+                        end
+                    end
+                end
+            end
+            pcall(function() writefile(DIR .. "/inv.txt", table.concat(out, "\n")) end)
+            log("INV -> dq/inv.txt")
+        end)
     elseif a == "mobs" then
         -- every model in Enemies (also ones with no Humanoid) + map parts near us named like gem / crystal / orb / core
         go("mobs", function()
@@ -1940,6 +2147,7 @@ local function runCmd(line)
     end
 end
 go("cmd", function()
+    if not DEV then return end -- test loop only on the owner's PC
     while F.alive do
         pcall(function()
             if isfile and isfile(DIR .. "/cmd.txt") then
@@ -2045,7 +2253,8 @@ UI.toggle(lj, "Daily reward", get("autoDaily"), set("autoDaily"))
 UI.toggle(lj, "Claim finished quests", get("autoQuests"), set("autoQuests"))
 UI.button(lj, "Run lobby jobs now", "Run", function() lobbyJobs() end)
 local sn = UI.card(lobP, 2, "Sell")
-UI.toggle(sn, "Auto sell (lobby and run end)", get("autoSell"), set("autoSell"))
+UI.toggle(sn, "Auto sell (in the lobby)", get("autoSell"), set("autoSell"))
+UI.stepper(sn, "Go to lobby to sell at (items)", 30, 200, get("sellAt"), set("sellAt"), 10)
 UI.button(sn, "Matches now", "Count", function() countSell() end)
 UI.info(sn, "Would sell", function() return sellInfo.matches end)
 UI.button(sn, "Sell now", "Sell", function() sellNow() end)

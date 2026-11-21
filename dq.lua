@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_68"
+local VERSION = "dq_69"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -538,8 +538,17 @@ function M.kick(code, reason)
     pcall(function() game:GetService("Players").LocalPlayer:Kick(msg) end)
 end
 function M.progress() lastProgress = os.clock() end
-function M.pullback() pulls[#pulls + 1] = os.clock() end
-function M.error() errs[#errs + 1] = os.clock() end
+-- at most one pull-back per 0.5 s: a hub that reports every frame must not trip S02 (dq 11-21: 686 in 60 s)
+function M.pullback()
+    local now = os.clock()
+    if pulls[#pulls] and now - pulls[#pulls] < 0.5 then return end
+    pulls[#pulls + 1] = now
+end
+function M.error()
+    local now = os.clock()
+    if errs[#errs] and now - errs[#errs] < 0.2 then return end
+    errs[#errs + 1] = now
+end
 
 function M.start(opts)
     for k, v in pairs(opts or {}) do
@@ -764,7 +773,8 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     if not r then return end
     local dt = os.clock() - lastSet.t
     if dt > 0.6 then lastSet = nil return end
-    if (r.Position - lastSet.pos).Magnitude > 10 then
+    -- sideways only: falling after a hover is gravity, not the server
+    if (flat(r.Position) - flat(lastSet.pos)).Magnitude > 10 then
         S.pullBacks = S.pullBacks + 1
         if MSafe then MSafe.pullback() end
         log(string.format("PULLBACK set %s now %s", v3s(lastSet.pos), v3s(r.Position)))
@@ -947,11 +957,9 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     if os.clock() - hold.t > 0.5 then hold = nil return end
     local r = hrp()
     if not r then return end
-    if (r.Position - hold.cf.Position).Magnitude > 12 then
-        S.pullBacks = S.pullBacks + 1
-        if MSafe then MSafe.pullback() end
-        log(string.format("PULLBACK (hover) want %s now %s", v3s(hold.cf.Position), v3s(r.Position)))
-    end
+    -- (a gap here is our own hold fighting our own moves, not the server: never counted - it set off a false
+    -- safety kick [S02] "686 pull-backs in 60 s" on 11-21 16:13)
+    if S.movingUntil and os.clock() < S.movingUntil then return end
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = hold.cf
 end)
@@ -1244,7 +1252,9 @@ local function dodgeCheck()
         local look = (curTarget and curTarget.Parent) and curTarget.Position or (to + r.CFrame.LookVector)
         -- never one instant jump of more than 40 studs (anti-cheat #101): longer dodges go in steps
         if (to - r.Position).Magnitude > 40 then
-            task.spawn(function() moveTo(to, look) end)
+            -- while this stepped move runs, the hover hold must not drag us back to the old spot
+            S.movingUntil = os.clock() + 3
+            task.spawn(function() moveTo(to, look) S.movingUntil = nil end)
         else
             setCF(faceCF(to, look)) -- face the mob: the swing loop keeps hitting from the side
         end
@@ -1570,6 +1580,7 @@ end
 local function engage(e)
     local r = hrp()
     if not r then return end
+    if S.movingUntil and os.clock() < S.movingUntil then return end -- a stepped dodge is still moving us
     -- safe zone up: we stay in it (dodgeCheck holds us there); hit whatever is in reach from inside
     if safeZone() then
         hold = nil

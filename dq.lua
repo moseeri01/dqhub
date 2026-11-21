@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_91"
+local VERSION = "dq_93"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -796,9 +796,23 @@ end
 --------------------------------------------------------------------------------
 local hold = nil -- hover hold {cf, t}, see engage
 local lastSet = nil -- {pos, t}
+-- movement budget (11-21 DQKICK numbers: the kicked friend moved 630 studs in 10 s, 35 of 59 quarter-seconds over
+-- 12 studs; the owner, never kicked, 300-400). Our own moves are counted; above ~40 studs/s over 5 s we slow down.
+local moveLog = {}
+local MOVE_BUDGET = 200 -- studs per 5 s
+local function movedRecently()
+    local now, sum = os.clock(), 0
+    for i = #moveLog, 1, -1 do
+        if now - moveLog[i].t > 5 then table.remove(moveLog, i) else sum = sum + moveLog[i].d end
+    end
+    return sum
+end
+S.movedRecently = movedRecently
 local function setCF(cf)
     local r = hrp()
     if not r then return end
+    local d = (cf.Position - r.Position).Magnitude
+    if d > 1 then moveLog[#moveLog + 1] = { t = os.clock(), d = d } end
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = cf
     hold = nil -- a real move ends any hover hold (old hold pulled us back to the last mob)
@@ -841,6 +855,11 @@ local function moveTo(pos, lookAt, mode)
             r = hrp()
             if not r or not F.alive then return end
             local d = pos - r.Position
+            local w0 = os.clock()
+            while movedRecently() > MOVE_BUDGET and os.clock() - w0 < 3 and F.alive do task.wait(0.1) end
+            r = hrp()
+            if not r then return end
+            d = pos - r.Position
             if d.Magnitude <= step then setCF(faceCF(pos, lookAt)) return end
             setCF(faceCF(r.Position + d.Unit * step, lookAt))
             task.wait(tonumber(cfg.tpWait) or 0.12)
@@ -1276,6 +1295,7 @@ local function dodgeCheck()
     -- so in a party: at most one dodge a second and only short ones (25 studs); otherwise stay and take the hit.
     -- (dq_90 slowed party dodges to 1/s, 25 studs: the friend was still kicked with only 8 dodges - back to the old rule)
     if os.clock() - lastDodge < 0.25 then return false end
+    -- (dq_92 skipped dodges over the move budget; owner 11-21: dodge as before - only the travel is slowed)
     local zone = dangerAt(r.Position)
     -- Light: let small zones hit us, leave only the big area attacks
     if zone and not zoneWorthDodging(zone) then

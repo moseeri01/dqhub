@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_98"
+local VERSION = "dq_99"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -694,7 +694,7 @@ local function pickTarget()
         if e.m:GetAttribute("Boss") == true then score = score - 1500 end
         -- a mob whose hp did not move while we hit it (decoy / immune phase, owner 11-21: lvl 80 boss copies): skip it a while
         -- 11-21 lvl 80 Electro Elemental: immune at 50% until Powered Statue (8.26M) dies; +100000 lost to the -hp/50 boss bonus -> +1e9 = only when nothing else is left
-        if S.decoy and S.decoy[e.m] and (os.clock() < S.decoy[e.m] or (S.decoyHp and S.decoyHp[e.m] and e.h.Health >= S.decoyHp[e.m] - 1)) then score = score + 1e9 end
+        if S.decoy and S.decoy[e.m] and (os.clock() < S.decoy[e.m] or (S.decoyHp and S.decoyHp[e.m] and e.h.Health >= S.decoyHp[e.m] - e.h.MaxHealth * 0.002)) then score = score + 1e9 end
         -- 11-21 lvl 80: 12 mobs with the same 11M hp -> the pick flipped several times a second and nothing died.
         -- Stick to the current target (worth 60 studs) and among equals finish the most hurt one first.
         if e.m == S.stickTo then score = score - 60 end
@@ -1697,7 +1697,9 @@ local function engage(e)
         S.decoy = S.decoy or {}
         if S.dTarget ~= e.m then S.dTarget, S.dT0, S.dHp = e.m, now, e.h.Health
         elseif swingOn and now - S.dT0 > 2.5 then -- 11-21 owner: 6 s was slow to leave an immune boss
-            if e.h.Health >= S.dHp - 1 then
+            -- 11-21 lvl 100 Haste Tower: 80 s on it, 73M -> 68.9M (others alive); "hardly drops" counts as immune too:
+            -- under 0.2% of max hp in 2.5 s of swinging (tower: 0.07%; a 320M boss solo still loses ~0.5%)
+            if S.dHp - e.h.Health < e.h.MaxHealth * 0.002 then
                 S.decoy[e.m] = now + 20
                 S.decoyHp = S.decoyHp or setmetatable({}, { __mode = "k" })
                 S.decoyHp[e.m] = e.h.Health

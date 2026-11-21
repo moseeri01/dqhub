@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_50"
+local VERSION = "dq_51"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -69,7 +69,7 @@ local DEFAULT = {
     move = "Teleport", tpStep = 60, tpWait = 0.12, tweenSpeed = 60, swingRate = 10, standDist = 4, hover = 10,
     autoQE = true, bossFirst = true, endAction = "Retry", stuckTimeout = 480, lobbyWait = 8,
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
-    autoBest = true, retry = true, dodge = false, -- owner 11-21: farming without dodge is faster even with deaths
+    autoBest = true, retry = true, dodge = false, dodgeLight = true, -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
     badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, dangerAnims = {}, bossCells = {}, mobHeight = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
@@ -367,7 +367,8 @@ local function notify(msg)
     pcall(function() game:GetService("StarterGui"):SetCore("SendNotification", { Title = "moseeri dungeon", Text = tostring(msg), Duration = 4 }) end)
 end
 -- dropdown: label on the left, the picked item on the right; a click opens the list under the row, a pick closes it
-function UI.dropdown(card, text, height, getItems, getKey, onPick)
+-- multi (optional) = { isOn = function(key), summary = function() } : several picks, the list stays open
+function UI.dropdown(card, text, height, getItems, getKey, onPick, multi)
     local r = row(card, text)
     local b = new("TextButton", { AutoButtonColor = false, BackgroundColor3 = T.off, BorderSizePixel = 0, Size = UDim2.new(0.78, 0, 0, 28), Position = UDim2.new(0.22, 0, 0.5, -14),
         Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = T.white, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Text = "" }, r)
@@ -421,17 +422,18 @@ function UI.dropdown(card, text, height, getItems, getKey, onPick)
                         right = label(x, it.right, 12, T.mute, Enum.Font.Gotham, { Size = UDim2.new(0.4, -10, 0, 16), Position = UDim2.new(0.6, 0, 0, it.sub and 22 or 5),
                             TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd })
                     end
-                    x.MouseButton1Click:Connect(function() pcall(onPick, it.key) setOpen(false) paint() end)
+                    x.MouseButton1Click:Connect(function() pcall(onPick, it.key) if not multi then setOpen(false) end lastKey = {} paint() end)
                     rows[#rows + 1] = { btn = x, key = it.key, main = main, sub = sub, right = right, dim = it.dim }
                 end
             end
         end
         local shown = "-"
         for _, it in ipairs(items) do if not it.header and it.key == cur then shown = it.short or it.text end end
+        if multi then pcall(function() shown = multi.summary() end) end
         b.Text = shown
         for _, x in ipairs(rows) do
             if x.main then
-                local on = x.key == cur
+                local on = (multi and multi.isOn(x.key)) or (not multi and x.key == cur)
                 x.btn.BackgroundColor3 = on and T.accent or T.off
                 x.main.TextColor3 = on and T.onAccent or (x.dim and T.mute or T.text)
                 if x.sub then x.sub.TextColor3 = on and T.onAccent or T.mute end
@@ -1028,11 +1030,13 @@ local function dodgeCheck()
             return true
         end
     end
-    if not cfg.dodge then return false end
+    if not cfg.dodge and not cfg.dodgeLight then return false end
     local r = hrp()
     if not r then return false end
     if os.clock() - lastDodge < 0.25 then return false end
     local zone = dangerAt(r.Position)
+    -- Light: let small zones hit us, leave only the big area attacks
+    if zone and not cfg.dodge and math.max(zone.Size.X, zone.Size.Z) < 40 then zone = nil end
     if zone then
         S.zoneSeen = S.zoneSeen or {}
         if cfg.timingLog and not S.zoneSeen[zone] then
@@ -2201,7 +2205,9 @@ UI.info(fc, "Now", function() return S.phase .. " · " .. tostring(S.target) end
 local fi = UI.card(farmP, 1, "Fight")
 UI.choice(fi, "Move", { "Teleport", "Tween", "Walk" }, get("move"), set("move"))
 UI.stepper(fi, "Hover over mob (0 = ground)", 0, 30, get("hover"), set("hover"), 2)
-UI.toggle(fi, "Dodge red zones", get("dodge"), set("dodge"))
+-- Off = never dodge; Light = only big area attacks (40+ wide); Full = every red zone (slower farming)
+UI.choice(fi, "Dodge", { "Off", "Light", "Full" }, function() return cfg.dodge and "Full" or (cfg.dodgeLight and "Light" or "Off") end,
+    function(v) cfg.dodge = (v == "Full") cfg.dodgeLight = (v == "Light") saveCfg() end)
 UI.toggle(fi, "Auto Q / E", get("autoQE"), set("autoQE"))
 UI.toggle(fi, "Boss first", get("bossFirst"), set("bossFirst"))
 
@@ -2278,9 +2284,30 @@ UI.info(sn, "Would sell", function() return sellInfo.matches end)
 UI.button(sn, "Sell now", "Sell", function() sellNow() end)
 UI.info(sn, "Last sell", function() return sellInfo.last end)
 local sc = UI.card(lobP, 2, "What to sell")
-UI.pills(sc, { "common", "uncommon", "rare", "epic", "legendary", "heirloom" }, function(o) return cfg.sellRarity[o] == true end,
-    function(o) cfg.sellRarity[o] = not cfg.sellRarity[o] or nil saveCfg() end)
-UI.pills(sc, TYPES, function(o) return cfg.sellTypes[o] == true end, function(o) cfg.sellTypes[o] = not cfg.sellTypes[o] or nil saveCfg() end)
+-- dropdowns instead of pill rows (owner 11-21: shorter, less lag); tap an entry to switch it, the list stays open
+local function pickList(tbl, names)
+    return function()
+        local out = {}
+        for _, o in ipairs(names) do out[#out + 1] = { key = o, text = o, right = tbl()[o] and "sell" or "keep" } end
+        return out
+    end
+end
+local function pickSummary(tbl, names)
+    return function()
+        local on = {}
+        for _, o in ipairs(names) do if tbl()[o] then on[#on + 1] = o end end
+        return #on == 0 and "nothing" or (#on == #names and "all" or table.concat(on, ", "))
+    end
+end
+local RAR_LIST = { "common", "uncommon", "rare", "epic", "legendary", "heirloom" }
+local rarT = function() return cfg.sellRarity end
+local typT = function() return cfg.sellTypes end
+UI.dropdown(sc, "Rarity", 130, pickList(rarT, RAR_LIST), pickSummary(rarT, RAR_LIST),
+    function(o) cfg.sellRarity[o] = not cfg.sellRarity[o] or nil saveCfg() end,
+    { isOn = function(o) return cfg.sellRarity[o] == true end, summary = pickSummary(rarT, RAR_LIST) })
+UI.dropdown(sc, "Item types", 150, pickList(typT, TYPES), pickSummary(typT, TYPES),
+    function(o) cfg.sellTypes[o] = not cfg.sellTypes[o] or nil saveCfg() end,
+    { isOn = function(o) return cfg.sellTypes[o] == true end, summary = pickSummary(typT, TYPES) })
 UI.note(sc, "Never sells locked or equipped items.")
 
 local limP = UI.page("Limit test", 3)

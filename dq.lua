@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_64"
+local VERSION = "dq_66"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -968,7 +968,7 @@ local function sideSpot(from)
         for _, rad in ipairs({ 5, 8, 11 }) do
             for k = 0, 15 do
                 local a = k * math.pi / 8
-                local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and (tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 24) or 24) or 0 -- stay up: melee swings miss us
+                local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and math.min(24, tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 20) or 24) or 0 -- stay up: melee swings miss us
                 local p = Vector3.new(tp.X + math.cos(a) * rad, tp.Y + hov, tp.Z + math.sin(a) * rad)
                 if okSpot(p) then
                     local dd = (p - from).Magnitude
@@ -989,7 +989,7 @@ local function safeSpot(from, zone)
     if s then return s end
     if curTarget and curTarget.Parent then
         local tp = curTarget.Position
-        local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and (tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 24) or 24) or 0
+        local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and math.min(24, tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 20) or 24) or 0
         local best, bestD
         for _, rad in ipairs({ 14, 18, 22 }) do
             for k = 0, 15 do
@@ -1004,7 +1004,8 @@ local function safeSpot(from, zone)
         end
     end
     -- no clear spot in reach: get out anyway (11-21 Cursed Marshes: stayed in a 50-wide zone and took -2040)
-    for _, rad in ipairs({ 8, 14, 22, 32, 45, 60, 80, 110, 140, 180, 230 }) do
+    -- 11-21 15:54 kick "Abnormal player behaviour #101" came right after a 420-stud instant dodge: stay within 45 studs
+    for _, rad in ipairs({ 8, 14, 22, 32, 45 }) do
         for k = 0, 11 do
             local a = k * math.pi / 6
             local p = from + Vector3.new(math.cos(a) * rad, 0, math.sin(a) * rad)
@@ -1115,7 +1116,12 @@ local function dodgeCheck()
         end
         lastDodge = os.clock()
         local look = (curTarget and curTarget.Parent) and curTarget.Position or (to + r.CFrame.LookVector)
-        setCF(faceCF(to, look)) -- face the mob: the swing loop keeps hitting from the side
+        -- never one instant jump of more than 40 studs (anti-cheat #101): longer dodges go in steps
+        if (to - r.Position).Magnitude > 40 then
+            task.spawn(function() moveTo(to, look) end)
+        else
+            setCF(faceCF(to, look)) -- face the mob: the swing loop keeps hitting from the side
+        end
         S.dodges = S.dodges + 1
         if os.clock() - (S.lastDodgeLog or 0) > 3 then S.lastDodgeLog = os.clock() log(string.format("DODGE -> %s (%d live zones, %d dodges)", v3s(to), #liveDangers(), S.dodges)) end
         return true
@@ -1349,7 +1355,9 @@ local function ddNow() local p = LP:FindFirstChild("dungPerformance") local v = 
 -- Per mob name: start at +24; 1.5 s of swinging with no damage -> 4 lower (min 6); damage for 15 s -> try 3 higher
 -- (max 34). Kept across runs in cfg.mobHeight.
 --------------------------------------------------------------------------------
-local function heightFor(name) return tonumber(cfg.mobHeight[name]) or 24 end
+-- capped at 24 after the #101 kick (we hovered +36 over Addonis just before it)
+local HEIGHT_MAX = 24
+local function heightFor(name) return math.min(HEIGHT_MAX, tonumber(cfg.mobHeight[name]) or 20) end
 local HT = {}
 local function heightTick(e)
     local now, name = os.clock(), e.m.Name
@@ -1358,7 +1366,7 @@ local function heightTick(e)
     local h = heightFor(name)
     if ddNow() > HT.dd0 then
         HT.okSince = HT.okSince or now
-        if now - HT.okSince > 15 and h < 34 then
+        if now - HT.okSince > 15 and h < HEIGHT_MAX then
             cfg.mobHeight[name] = h + 3 HT.okSince = now
             log(string.format("HEIGHT %s -> %d (hitting fine, trying higher)", name, h + 3))
         end
@@ -2196,6 +2204,22 @@ local function runCmd(line)
                     task.wait(0.5)
                 end
             end
+        end)
+    elseif a == "colltest" then
+        -- read only: can our character physically touch mobs? (collision groups + CanCollide)
+        go("colltest", function()
+            local PS = game:GetService("PhysicsService")
+            local c, r = char(), hrp()
+            local myG = r and r.CollisionGroup or "?"
+            local e = enemies()[1]
+            if not e then log("COLLTEST no mob") return end
+            local groups = {}
+            for _, p in ipairs(e.m:GetDescendants()) do if p:IsA("BasePart") then groups[p.CollisionGroup .. (p.CanCollide and "+collide" or "-nocollide")] = (groups[p.CollisionGroup .. (p.CanCollide and "+collide" or "-nocollide")] or 0) + 1 end end
+            local gl = {}
+            for k, v in pairs(groups) do gl[#gl + 1] = k .. " x" .. v end
+            local can = "?"
+            pcall(function() can = tostring(PS:CollisionGroupsAreCollidable(myG, e.r.CollisionGroup)) end)
+            log(string.format("COLLTEST me group %s collide %s | %s parts: %s | my group vs its root group collidable: %s", myG, tostring(r and r.CanCollide), e.m.Name, table.concat(gl, ", "), can))
         end)
     elseif a == "fftest" then
         -- does ApplyForcefield (sent by the game during a Flashstep jump) give a shield without a jump?

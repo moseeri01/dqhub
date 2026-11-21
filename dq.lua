@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_54"
+local VERSION = "dq_55"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -71,7 +71,7 @@ local DEFAULT = {
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
     autoBest = true, retry = true, dodge = false, dodgeLight = true, -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
-    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
+    badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
 }
 local cfg = {}
@@ -88,7 +88,9 @@ local function saveCfg() pcall(function() writefile(DIR .. "/cfg.json", HttpServ
 do
     local carryOn = G.dq_continue == true
     G.dq_continue = nil
-    if not carryOn and cfg.farm then cfg.farm = false saveCfg() end
+    -- owner 11-21: Auto farm (fight in the dungeon) and Auto join (start a dungeon from the lobby) are separate;
+    -- a fresh join never starts a dungeon by itself
+    if not carryOn and cfg.autoJoin then cfg.autoJoin = false saveCfg() end
 end
 
 -- reload this file after every teleport (Retry / Return / PlaySolo move us to new servers)
@@ -1912,6 +1914,7 @@ local function lobbyTick()
         local ok, err = pcall(lobbyJobs)
         if not ok then log("ERR lobby jobs: " .. tostring(err)) end
     end
+    if not cfg.autoJoin then S.target = "Auto join is off" return end
     local ps = R("PlaySolo")
     if not ps then S.target = "no PlaySolo remote" return end
     local map, diff = playing(cfg.recordRoute and not cfg.farm)
@@ -1987,7 +1990,7 @@ go("farm", function()
             local ok, err = pcall(lobbyTick)
             if not ok then log("ERR record start: " .. tostring(err)) end
             task.wait(0.5)
-        elseif cfg.farm and not S.limitBusy then
+        elseif (IN_LOBBY and (cfg.farm or cfg.autoJoin) or cfg.farm) and not S.limitBusy then
             local ok, err = pcall(IN_LOBBY and lobbyTick or dungeonTick)
             if not ok then S.errors = S.errors + 1 log("ERR tick: " .. tostring(err)) task.wait(1) end
             task.wait(0.1)
@@ -2268,7 +2271,8 @@ local function mapReq(name) for _, m in ipairs(MAP_REQ) do if m.map == name then
 -- fine-tuning numbers live on the Limit test page
 local farmP = UI.page("Farm", 1)
 local fc = UI.card(farmP, 1, "Dungeon")
-UI.toggle(fc, "Auto farm", get("farm"), set("farm"))
+UI.toggle(fc, "Auto farm (fight in dungeons)", get("farm"), set("farm"))
+UI.toggle(fc, "Auto join dungeon (from lobby)", get("autoJoin"), set("autoJoin"))
 UI.toggle(fc, "Auto best (level up)", get("autoBest"), set("autoBest"))
 UI.toggle(fc, "Retry after clear (off = lobby)", get("retry"), set("retry"))
 UI.toggle(fc, "Hardcore", get("hardcore"), set("hardcore"))

@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_103"
+local VERSION = "dq_104"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -672,8 +672,8 @@ local function enemies()
     for _, m in ipairs(folder:GetChildren()) do
         local h = m:IsA("Model") and m:FindFirstChildOfClass("Humanoid")
         local r = mobRoot(m)
-        -- dummies in the lobby have ~1e25 hp: never a target
-        if h and r and h.Health > 0 and h.MaxHealth < 1e12 then out[#out + 1] = { m = m, h = h, r = r } end
+        -- dummies in the lobby have ~1e25 hp: never a target (11-22: cap was 1e12, lvl 185 boss Pale Bloodmaiden has 1.75e12 and was skipped)
+        if h and r and h.Health > 0 and h.MaxHealth < 1e20 then out[#out + 1] = { m = m, h = h, r = r } end
     end
     return out
 end

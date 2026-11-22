@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_110"
+local VERSION = "dq_111"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1171,6 +1171,25 @@ local function crowded(p)
     return false
 end
 local function okSpot(p) return not dangerAt(p) and hasFloor(p) and not crowded(p) end
+-- 11-22 lvl 220 Master Ryuken: KickLanding circles are up to 323 wide (no way out sideways within 45 studs) but only
+-- reach ~53 over their centre. Go straight up over the zone's top instead: at most 45 studs up, floor still below.
+local function zoneTop(p)
+    local cf, s = p.CFrame, p.Size
+    return p.Position.Y + math.abs(cf.RightVector.Y) * s.X / 2 + math.abs(cf.UpVector.Y) * s.Y / 2 + math.abs(cf.LookVector.Y) * s.Z / 2
+end
+local function liftOver(pos, test)
+    local q = pos
+    for _ = 1, 4 do
+        local z = test(q)
+        if not z then
+            if q == pos or q.Y - pos.Y > 45 or not hasFloor(q) or crowded(q) then return nil end
+            return q
+        end
+        q = Vector3.new(q.X, math.max(q.Y, zoneTop(z)) + 7, q.Z)
+        if q.Y - pos.Y > 45 then return nil end
+    end
+    return nil
+end
 -- fall guard: remember the last spot with floor under it; if we end up far below it with nothing under us, go back
 do
     local lastSafe
@@ -1255,6 +1274,7 @@ local function safeSpot(from, zone)
             if okSpot(p) then return p end
         end
     end
+    do local up = liftOver(from, dangerAt) if up then return up end end
     -- nowhere clear within 110 studs: stay and keep hitting (the old jump to the map start bounced us
     -- 350 studs back and forth every second on 11-21; flying up dropped us into the void)
     return nil
@@ -1745,8 +1765,14 @@ local function bossSpot(e)
     local stats = cfg.bossCells[name]
     local cur = S.bossCell
     if cur and cur.boss == e.m and now < cur.until_ then
-        local p = cellPos(e.r, cur.ai, cur.ri, cur.hi)
-        if ((cfg.dodge and okSpot(p) or (not cfg.dodge and not hotAt(p))) and not crowded(p)) then
+        local p = cur.lift or cellPos(e.r, cur.ai, cur.ri, cur.hi)
+        if cur.lift and hotAt(p) then p = Vector3.new(0, -1e6, 0) end
+        if cur.lift and p.Y > -1e5 then
+            cur.stat.s = (cur.stat.s or 0) + (now - cur.t)
+            cur.t = now
+            return p
+        end
+        if not cur.lift and ((cfg.dodge and okSpot(p) or (not cfg.dodge and not hotAt(p))) and not crowded(p)) then
             cur.stat.s = (cur.stat.s or 0) + (now - cur.t)
             cur.t = now
             return p
@@ -1775,7 +1801,21 @@ local function bossSpot(e)
             if not bestScore or score < bestScore then best, bestScore = { ai = ai, ri = ri, hi = hi, key = key, stat = st }, score end
         end
     end end end
-    if not best then return nil end
+    if not best then
+        -- every cell is in a zone the mode dodges: try the same cells lifted over the zone (closest ring first)
+        for ri = 1, #CELL_R do for ai = 1, 8 do
+            if not best then
+                local key = ai .. "_" .. ri .. "_1"
+                local q = liftOver(cellPos(e.r, ai, ri, 1), function(x) return hotAt(x) end)
+                if q and (q - e.r.Position).Magnitude < 40 then
+                    stats[key] = stats[key] or { s = 0, h = 0 }
+                    best = { ai = ai, ri = ri, hi = 1, key = key, stat = stats[key], lift = q }
+                end
+            end
+        end end
+        if not best then return nil end
+        if os.clock() - (S.liftLogT or 0) > 5 then S.liftLogT = os.clock() log(string.format("BOSS SPOT %s: all cells in zones - over them at %s", name, v3s(best.lift))) end
+    end
     best.boss, best.t, best.until_ = e.m, now, now + 2.5
     best.t0, best.dd0 = now, ddNow()
     if not cur or cur.key ~= best.key then
@@ -1783,7 +1823,7 @@ local function bossSpot(e)
         if not best.quiet then log(string.format("BOSS SPOT %s: dir %d dist %d up %s (hits %.1f in %.0fs there)", name, best.ai, CELL_R[best.ri], "learned", best.stat.h or 0, best.stat.s or 0)) end
     end
     S.bossCell = best
-    return cellPos(e.r, best.ai, best.ri, best.hi)
+    return best.lift or cellPos(e.r, best.ai, best.ri, best.hi)
 end
 -- a clear spot `radius` from `root` on our side of it (same height as us); nil if none is clear
 local function outside(root, radius)

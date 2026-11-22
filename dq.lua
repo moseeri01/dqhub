@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_108"
+local VERSION = "dq_110"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1127,6 +1127,11 @@ local function inZone(pos, p, margin)
     -- on their side (thin axis X, e.g. the 1x214x214 ring that one-shot us on 11-21 while we hovered over it).
     local sx, sy, sz = p.Size.X, p.Size.Y, p.Size.Z
     local thin = math.min(sx, sy, sz)
+    -- 11-22 lvl 220 Mue no Ikari FloorLava: the 1x444x528 Indicator came with its real Hitbox (50 thick, top 25 over
+    -- the floor) already there. As a 60 column the red plane blocked every spot up to 60 over the floor, no dodge spot
+    -- was clear and we sat in the lava. When the damage box is already there and thick, the red plane is not a column.
+    local sib = (thin <= 2.5 and p.Name == "Indicator" and p.Parent and p.Parent ~= workspace) and p.Parent:FindFirstChild("Hitbox")
+    if sib and sib:IsA("BasePart") and math.min(sib.Size.X, sib.Size.Y, sib.Size.Z) >= 20 then thin = 99 end
     if thin <= 2.5 then -- flat rings only; a 5-thick slash box is not a column (it blocked every spot, 11-21 13:43)
         if thin == sx then hx = math.max(hx, 60) elseif thin == sy then hy = math.max(hy, 60) else hz = math.max(hz, 60) end
     end
@@ -1344,6 +1349,43 @@ do
             end
             pcall(appendfile, DIR .. "/roses.txt", string.format("  rose gone after %.0fs\n\n", os.clock() - t0))
             log(string.format("ROSE gone after %.0fs", os.clock() - t0))
+        end)
+    end)
+    -- 11-22 DEV: lvl 220 Neon District last boss Mue no Ikari - FloorLava (Hitbox 50x444x528) covers the whole arena,
+    -- no dodge spot is ever clear and we die 6+ times. Record the zone's frame, the floor under us and the boss each second.
+    F.conns[#F.conns + 1] = workspace.DescendantAdded:Connect(function(o)
+        if not DEV or IN_LOBBY or not o:IsA("BasePart") or not isDanger(o) then return end
+        local s = o.Size
+        local big = 0 for _, v in ipairs({ s.X, s.Y, s.Z }) do if v >= 300 then big = big + 1 end end
+        if big < 2 or S.lavaRec then return end
+        S.lavaRec = true
+        go("lavawatch", function()
+            local L = { os.date("%H:%M:%S") .. " FLOORZONE " .. o:GetFullName() .. " size " .. v3s(o.Size) .. " pos " .. v3s(o.Position)
+                .. " right " .. v3s(o.CFrame.RightVector * 10) .. " up " .. v3s(o.CFrame.UpVector * 10) .. " look " .. v3s(o.CFrame.LookVector * 10) }
+            pcall(function()
+                for _, d in ipairs(o.Parent:GetDescendants()) do
+                    if d:IsA("BasePart") then L[#L + 1] = string.format("  part %s size %s pos %s up %s collide %s", d.Name, v3s(d.Size), v3s(d.Position), v3s(d.CFrame.UpVector * 10), tostring(d.CanCollide)) end
+                end
+            end)
+            pcall(appendfile, DIR .. "/lava.txt", table.concat(L, "\n") .. "\n")
+            log("FLOORZONE " .. o:GetFullName() .. " " .. v3s(o.Size) .. " -> dq/lava.txt")
+            local t0 = os.clock()
+            while F.alive and o.Parent and os.clock() - t0 < 60 do
+                local me = hrp()
+                local fl = "none"
+                if me then
+                    local hit = workspace:Raycast(me.Position, Vector3.new(0, -200, 0), floorParams)
+                    if hit then fl = string.format("%s y%.0f collide %s", hit.Instance:GetFullName(), hit.Position.Y, tostring(hit.Instance.CanCollide)) end
+                end
+                local b = {}
+                for _, e in ipairs(enemies()) do b[#b + 1] = string.format("%s %s", e.m.Name, v3s(e.r.Position)) end
+                local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+                pcall(appendfile, DIR .. "/lava.txt", string.format("  %.0fs me %s hp %.0fM inLava %s floor %s | %s\n", os.clock() - t0, me and v3s(me.Position) or "?",
+                    hum and hum.Health / 1e6 or -1, tostring(me and inZone(me.Position, o, 0) or false), fl, table.concat(b, ", ")))
+                task.wait(1)
+            end
+            pcall(appendfile, DIR .. "/lava.txt", string.format("  floor zone gone after %.0fs\n\n", os.clock() - t0))
+            S.lavaRec = nil
         end)
     end)
 end

@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_101"
+local VERSION = "dq_102"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1976,6 +1976,7 @@ local function dungeonTick()
     local e = pickTarget()
     if e then
         S.phase = "fight"
+        S.fought = true
         S.target = string.format("%s %.0f/%.0f", e.m.Name, e.h.Health, e.h.MaxHealth)
         -- DEV: every target change with all live mobs (owner 11-21: lvl 80 "hits the fake one, too slow")
         if DEV and S.lastTgt ~= e.m then
@@ -2002,6 +2003,48 @@ local function dungeonTick()
             S.phase = "wait"
             S.target = "no mob, no route"
             S.noMobSince = S.noMobSince or os.clock()
+            -- 11-22 level 160 (Ethereal Farlands): rooms are joined by pads (workspace Teleports: TeleportOne..Four
+            -- -> RecieverOne..Four); the next room's mobs only appear after standing on a pad. Room clear ->
+            -- go to the nearest pad not used yet this run and touch it.
+            local tpm = workspace:FindFirstChild("Teleports")
+            local r = hrp()
+            -- only once the run has started and we have fought here (10:23 test: a fresh run went to TeleportThree before Start)
+            local started = workspace:FindFirstChild("dungeonStarted")
+            if started and started:IsA("BoolValue") and not started.Value then tpm = nil end
+            if not S.fought then tpm = nil end
+            if tpm and r and os.clock() - S.noMobSince > 2 and os.clock() > (S.padNext or 0) then
+                S.padUsed = S.padUsed or {}
+                -- pads in number order (10:19 clean run: One then Two then the last boss). "Nearest" was wrong:
+                -- 10:40 the nearest after room 1 was TeleportFour, behind a barrier -> pulled back 26 times -> S02 kick
+                local best, bd
+                for _, nm in ipairs({ "TeleportOne", "TeleportTwo", "TeleportThree", "TeleportFour" }) do
+                    local pad = tpm:FindFirstChild(nm)
+                    if pad and pad:IsA("BasePart") and not S.padUsed[pad] then
+                        best, bd = pad, (pad.Position - r.Position).Magnitude
+                        break
+                    end
+                end
+                if best then
+                    S.padUsed[best] = true
+                    S.padNext = os.clock() + 4
+                    log(string.format("PAD room clear -> %s (%.0f studs)", best.Name, bd))
+                    moveTo(best.Position + Vector3.new(0, 3, 0))
+                    pcall(function()
+                        local rr = hrp()
+                        if firetouchinterest and rr then firetouchinterest(rr, best, 0) task.wait(0.1) firetouchinterest(rr, best, 1) end
+                    end)
+                    -- pulled back off the pad (a used pad behind a barrier, 10:24 test) -> leave pads alone for a while
+                    task.wait(0.6)
+                    local rr = hrp()
+                    -- a working pad sends us to its receiver far away; still near the pad = blocked / pulled back
+                    if rr and (rr.Position - best.Position).Magnitude < 150 then
+                        log("PAD " .. best.Name .. " did not send us anywhere (blocked) - pads paused 20 s")
+                        S.padNext = os.clock() + 20
+                    end
+                    S.noMobSince = os.clock()
+                    return
+                end
+            end
             if os.clock() - S.noMobSince > 25 then
                 log("no mob and no route for 25 s -> ReturnLobby")
                 S.noMobSince = nil

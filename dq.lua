@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_104"
+local VERSION = "dq_106"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -78,7 +78,7 @@ local DEFAULT = {
     move = "Teleport", tpStep = 60, tpWait = 0.12, tweenSpeed = 60, swingRate = 10, standDist = 4, hover = 10,
     autoQE = true, bossFirst = true, endAction = "Retry", stuckTimeout = 480, lobbyWait = 8,
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
-    autoBest = true, retry = true, dodge = false, dodgeLight = true, -- owner 11-21: farming without dodge is faster even with deaths
+    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
     badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false, tuneSet = 0,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
@@ -822,6 +822,15 @@ local function setCF(cf)
     if not r then return end
     local d = (cf.Position - r.Position).Magnitude
     if d > 1 then moveLog[#moveLog + 1] = { t = os.clock(), d = d } end
+    -- 11-22 lvl 185: a spot the game keeps pushing us out of (wall / big boss body) -> go where it puts us instead
+    if S.blockedSpots then
+        local now = os.clock()
+        for i = #S.blockedSpots, 1, -1 do
+            local b = S.blockedSpots[i]
+            if now > b.untilT then table.remove(S.blockedSpots, i)
+            elseif (flat(cf.Position) - flat(b.set)).Magnitude < 5 then cf = CFrame.new(b.now) * (cf - cf.Position) break end
+        end
+    end
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = cf
     hold = nil -- a real move ends any hover hold (old hold pulled us back to the last mob)
@@ -836,9 +845,23 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     if dt > 0.6 then lastSet = nil return end
     -- sideways only: falling after a hover is gravity, not the server
     if (flat(r.Position) - flat(lastSet.pos)).Magnitude > 10 then
-        S.pullBacks = S.pullBacks + 1
-        if MSafe then MSafe.pullback() end
-        log(string.format("PULLBACK set %s now %s", v3s(lastSet.pos), v3s(r.Position)))
+        local now = os.clock()
+        local h = hum()
+        -- 11-22 S02 kick lvl 185: dying / respawning moves the body; that is not the server pulling us back
+        if not h or h.Health <= 0 or now - (S.deathT or -99) < 5 then lastSet = nil return end
+        -- the same set spot pushed to the same place again = blocked spot (wall / boss body), not a server rollback:
+        -- count it once, then stop asking for that spot for 20 s (setCF swaps it for where the game puts us)
+        local same = S.lastPb and now - S.lastPb.t < 10 and (S.lastPb.set - lastSet.pos).Magnitude < 4 and (S.lastPb.now - r.Position).Magnitude < 4
+        S.lastPb = { set = lastSet.pos, now = r.Position, t = now }
+        if same then
+            S.blockedSpots = S.blockedSpots or {}
+            table.insert(S.blockedSpots, { set = lastSet.pos, now = r.Position, untilT = now + 20 })
+            log(string.format("BLOCKED SPOT %s (pushed to %s again) - avoided 20 s, not counted", v3s(lastSet.pos), v3s(r.Position)))
+        else
+            S.pullBacks = S.pullBacks + 1
+            if MSafe then MSafe.pullback() end
+            log(string.format("PULLBACK set %s now %s", v3s(lastSet.pos), v3s(r.Position)))
+        end
         lastSet = nil
     end
 end)
@@ -1181,8 +1204,10 @@ local function sideSpot(from)
                 local a = k * math.pi / 8
                 local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and math.min(24, tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 20) or 24) or 0 -- stay up: melee swings miss us
                 local p = Vector3.new(tp.X + math.cos(a) * rad, tp.Y + hov, tp.Z + math.sin(a) * rad)
-                if okSpot(p) then
-                    local dd = (p - from).Magnitude
+                local dd = (p - from).Magnitude
+                -- 11-22 friend #101 (lvl 185 party): target switched to a mob ~280 studs away and the dodge flew to it
+                -- (1123 studs in 10 s). A dodge stays within 45 studs, like the fallback in safeSpot.
+                if dd <= 45 and okSpot(p) then
                     if not bestD or dd < bestD then best, bestD = p, dd end
                 end
             end
@@ -1206,8 +1231,10 @@ local function safeSpot(from, zone)
             for k = 0, 15 do
                 local a = k * math.pi / 8
                 local p = Vector3.new(tp.X + math.cos(a) * rad, tp.Y + hov, tp.Z + math.sin(a) * rad)
-                if okSpot(p) then
-                    local dd = (p - from).Magnitude
+                local dd = (p - from).Magnitude
+                -- 11-22 friend #101 (lvl 185 party): target switched to a mob ~280 studs away and the dodge flew to it
+                -- (1123 studs in 10 s). A dodge stays within 45 studs, like the fallback in safeSpot.
+                if dd <= 45 and okSpot(p) then
                     if not bestD or dd < bestD then best, bestD = p, dd end
                 end
             end
@@ -1282,6 +1309,41 @@ do
                     p and string.format(" size %.0fx%.0fx%.0f", p.Size.X, p.Size.Y, p.Size.Z) or "",
                     (p and r) and string.format(" %.0f studs", (p.Position - r.Position).Magnitude) or "", n, table.concat(kids, ",")))
             end)
+        end)
+    end)
+    -- 11-22 DEV: lvl 185 Pale Bloodmaiden "Rose" flowers (boss looked immune while they were up): full dump + boss hp each second
+    F.conns[#F.conns + 1] = workspace.ChildAdded:Connect(function(o)
+        if not DEV or IN_LOBBY or o.Name ~= "Rose" then return end
+        go("rosewatch", function()
+            task.wait(0.5)
+            local function at(x) local a = {} for k, v in pairs(x:GetAttributes()) do a[#a + 1] = k .. "=" .. tostring(v) end return table.concat(a, ",") end
+            local r = hrp()
+            local L = { os.date("%H:%M:%S") .. " ROSE attrs {" .. at(o) .. "} me " .. (r and v3s(r.Position) or "?") }
+            pcall(function()
+                for _, d in ipairs(o:GetDescendants()) do
+                    local s = d:GetFullName():gsub("^.-Rose%.", "") .. " " .. d.ClassName
+                    if d:IsA("BasePart") then s = s .. string.format(" size %s pos %s collide %s touch %s query %s transp %.2f", v3s(d.Size), v3s(d.Position), tostring(d.CanCollide), tostring(d.CanTouch), tostring(d.CanQuery), d.Transparency) end
+                    if d:IsA("ValueBase") then s = s .. " = " .. tostring(d.Value) end
+                    if d:IsA("Beam") then s = s .. " a0 " .. tostring(d.Attachment0 and d.Attachment0:GetFullName()) .. " a1 " .. tostring(d.Attachment1 and d.Attachment1:GetFullName()) end
+                    if d:IsA("ProximityPrompt") then s = s .. " PROMPT " .. d.ActionText .. " dist " .. d.MaxActivationDistance end
+                    local a = at(d) if a ~= "" then s = s .. " {" .. a .. "}" end
+                    L[#L + 1] = "  " .. s
+                end
+            end)
+            for _, e in ipairs(enemies()) do L[#L + 1] = string.format("  mob %s %.0fB/%.0fB {%s} at %s", e.m.Name, e.h.Health / 1e9, e.h.MaxHealth / 1e9, at(e.m), v3s(e.r.Position)) end
+            pcall(appendfile, DIR .. "/roses.txt", table.concat(L, "\n") .. "\n")
+            log("ROSE up -> dq/roses.txt")
+            local t0 = os.clock()
+            while F.alive and o.Parent and os.clock() - t0 < 90 do
+                local s = {}
+                for _, e in ipairs(enemies()) do if e.m:GetAttribute("Boss") then s[#s + 1] = string.format("%s %.1fB", e.m.Name, e.h.Health / 1e9) end end
+                local n = 0 for _, c in ipairs(workspace:GetChildren()) do if c.Name == "Rose" then n = n + 1 end end
+                local me = hrp()
+                pcall(appendfile, DIR .. "/roses.txt", string.format("  %.0fs roses %d boss %s me %s target %s\n", os.clock() - t0, n, table.concat(s, ","), me and v3s(me.Position) or "?", tostring(S.target)))
+                task.wait(1)
+            end
+            pcall(appendfile, DIR .. "/roses.txt", string.format("  rose gone after %.0fs\n\n", os.clock() - t0))
+            log(string.format("ROSE gone after %.0fs", os.clock() - t0))
         end)
     end)
 end
@@ -1886,7 +1948,7 @@ local function watchDeath()
     if h then
         F.conns[#F.conns + 1] = h.Died:Connect(function()
             if S.runCleared then return end -- the game drops us after the last boss; not a real death
-            S.deaths = S.deaths + 1 S.diedThisRun = true
+            S.deaths = S.deaths + 1 S.diedThisRun = true S.deathT = os.clock()
             S.runDeaths = (S.runDeaths or 0) + 1
             cfg.deathStreak = (tonumber(cfg.deathStreak) or 0) + 1 saveCfg()
             -- owner 11-21: don't jump to the lobby after a death (party runs go on, the friends are still fighting).
@@ -1898,7 +1960,7 @@ local function watchDeath()
     end
 end
 watchDeath()
-F.conns[#F.conns + 1] = LP.CharacterAdded:Connect(function() task.wait(1) watchDeath() end)
+F.conns[#F.conns + 1] = LP.CharacterAdded:Connect(function() S.deathT = os.clock() task.wait(1) watchDeath() end)
 
 --------------------------------------------------------------------------------
 -- main farm loop
@@ -2403,7 +2465,7 @@ local function lobbyTick()
     local hc = cfg.hardcore and S.tries[key] <= 2
     if S.tries[key] > 4 then
         S.refused[key] = true
-        log("PlaySolo " .. key .. " refused 4 times - skipping it" .. (cfg.autoBest and "" or " (manual pick: change map/difficulty)"))
+        if S.tries[key] == 5 then log("PlaySolo " .. key .. " refused 4 times - skipping it" .. (cfg.autoBest and "" or " (manual pick: change map/difficulty)")) end
         -- (no more farm OFF here: a hand-picked dungeon the server keeps refusing steps down one difficulty, see playing())
         return
     end
@@ -3087,8 +3149,20 @@ local fi = UI.card(farmP, 1, "Fight")
 UI.choice(fi, "Move", { "Teleport", "Tween", "Walk" }, get("move"), set("move"))
 UI.stepper(fi, "Hover over mob (0 = ground)", 0, 30, get("hover"), set("hover"), 2)
 -- Off = never dodge; Light = only big area attacks (40+ wide); Full = every red zone (slower farming)
-UI.choice(fi, "Dodge", { "Off", "Light", "Full" }, function() return cfg.dodge and "Full" or (cfg.dodgeLight and "Light" or "Off") end,
-    function(v) cfg.dodge = (v == "Full") cfg.dodgeLight = (v == "Light") saveCfg() end)
+-- owner 11-22: on/off switch apart from the mode; the mode is kept while dodge is off.
+-- cfg.dodge / cfg.dodgeLight stay the flags the fight code reads, worked out from dodgeOn + dodgeMode.
+if type(cfg.dodgeOn) ~= "boolean" then cfg.dodgeOn = (cfg.dodge or cfg.dodgeLight) and true or false end
+if cfg.dodgeMode ~= "Light" and cfg.dodgeMode ~= "Full" then cfg.dodgeMode = cfg.dodge and "Full" or "Light" end
+cfg.dodge = cfg.dodgeOn and cfg.dodgeMode == "Full"
+cfg.dodgeLight = cfg.dodgeOn and cfg.dodgeMode == "Light"
+UI.toggle(fi, "Dodge", function() return cfg.dodgeOn end, function(v)
+    cfg.dodgeOn = v and true or false
+    cfg.dodge = cfg.dodgeOn and cfg.dodgeMode == "Full" cfg.dodgeLight = cfg.dodgeOn and cfg.dodgeMode == "Light" saveCfg()
+end)
+UI.choice(fi, "Dodge mode", { "Light", "Full" }, function() return cfg.dodgeMode end, function(v)
+    cfg.dodgeMode = v
+    cfg.dodge = cfg.dodgeOn and v == "Full" cfg.dodgeLight = cfg.dodgeOn and v == "Light" saveCfg()
+end)
 UI.toggle(fi, "Auto Q / E", get("autoQE"), set("autoQE"))
 UI.toggle(fi, "Boss first", get("bossFirst"), set("bossFirst"))
 

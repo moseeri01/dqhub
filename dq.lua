@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_102"
+local VERSION = "dq_103"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1908,7 +1908,10 @@ local endSeen = nil
 local function dungeonTick()
     -- start screen
     local sb = pgui("mainGui.startDungeon")
-    if shown(sb) then
+    -- 11-22 lvl 180: after Start the same ImageLabel stays visible as a banner with no TextButton
+    -- (dungeonStarted = true) and the bot sat at the start, never fighting. Only a screen with a button counts.
+    local ds = workspace:FindFirstChild("dungeonStarted")
+    if shown(sb) and sb:FindFirstChild("TextButton") and not (ds and ds:IsA("BoolValue") and ds.Value) then
         S.phase = "start"
         local btn = sb:FindFirstChild("TextButton")
         if btn and press(btn) then

@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_106"
+local VERSION = "dq_108"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -78,7 +78,7 @@ local DEFAULT = {
     move = "Teleport", tpStep = 60, tpWait = 0.12, tweenSpeed = 60, swingRate = 10, standDist = 4, hover = 10,
     autoQE = true, bossFirst = true, endAction = "Retry", stuckTimeout = 480, lobbyWait = 8,
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
-    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
+    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
     badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false, tuneSet = 0,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
@@ -1687,6 +1687,15 @@ local function cellPos(root, ai, ri, hi)
     local dir = Vector3.new(look.X * math.cos(a) - look.Z * math.sin(a), 0, look.X * math.sin(a) + look.Z * math.cos(a))
     return root.Position + dir * CELL_R[ri] + Vector3.new(0, heightFor(root.Parent and root.Parent.Name or "?"), 0)
 end
+-- 11-22 Forsaken Limbo: Destined Death's Ring (44x64) + Line zones show ~3 s before the damage. Light mode dodged
+-- out, but the boss spot / stand spot only checked zones in Full mode, so the next tick put us straight back in
+-- (12 deaths in one run). A zone the current mode would dodge is never chosen as a place to stand.
+local function hotAt(pos)
+    if cfg.dodge then return dangerAt(pos) end
+    if not cfg.dodgeLight then return nil end
+    for _, p in ipairs(liveDangers()) do if inZone(pos, p) and zoneWorthDodging(p) then return p end end
+    return nil
+end
 local function bossSpot(e)
     local now = os.clock()
     local name = e.m.Name
@@ -1695,7 +1704,7 @@ local function bossSpot(e)
     local cur = S.bossCell
     if cur and cur.boss == e.m and now < cur.until_ then
         local p = cellPos(e.r, cur.ai, cur.ri, cur.hi)
-        if ((okSpot(p) or not cfg.dodge) and not crowded(p)) then
+        if ((cfg.dodge and okSpot(p) or (not cfg.dodge and not hotAt(p))) and not crowded(p)) then
             cur.stat.s = (cur.stat.s or 0) + (now - cur.t)
             cur.t = now
             return p
@@ -1714,7 +1723,7 @@ local function bossSpot(e)
         local st = stats[key] or { s = 0, h = 0 }
         stats[key] = st
         local p = cellPos(e.r, ai, ri, hi)
-        if ((okSpot(p) or not cfg.dodge) and not crowded(p)) and not (leave and cur.key == key) then
+        if ((cfg.dodge and okSpot(p) or (not cfg.dodge and not hotAt(p))) and not crowded(p)) and not (leave and cur.key == key) then
             local score = ((st.h or 0) + 0.5) / ((st.s or 0) + 3) + CELL_R[ri] * 0.002 + math.min(3, st.nd or 0) * 0.3
             local sec = mySector()
             if sec then
@@ -1856,7 +1865,7 @@ local function engage(e)
     curTarget = e.r
     -- the usual spot is in a red zone: take a clear spot beside the mob (on the ground) and keep hitting
     local side = false
-    if cfg.dodge and dangerAt(stand) then
+    if hotAt(stand) then
         local s = sideSpot(r.Position)
         if s then stand, side = s, true else
             -- no clear spot at the mob (held beams): never step into the red (11-21: it kept teleporting back into a beam).
@@ -1917,6 +1926,46 @@ do
                 log("RUN-END signal " .. n .. "(" .. table.concat(parts, ", ") .. ")")
             end)
         end
+    end
+end
+
+-- 11-22 portal floors: the game shows 3 portal cards (Portals gui) to the HOST only, and its own card button
+-- just fires DisplayPortals:FireServer(slot 1-3). We note the offered names from the same event and pick the
+-- safest card. Evasion (HP set to 1, hardcore) / Wager / Dominion / Overkill are last because the character
+-- already dies a lot at 185+.
+do
+    local PORTAL_RANK = { Treasure = 1, Fortune = 2, Haste = 3, Quickfire = 4, Duplication = 5, Combination = 6,
+        Echo = 7, Regular = 8, Gathering = 9, Endurance = 10, Speed = 11, Chance = 12, Elite = 13, Balance = 14,
+        Equilibrium = 15, Strength = 16, Collosus = 17, Overkill = 18, Dominion = 19, Wager = 20, Evasion = 21 }
+    local dp = R("DisplayPortals")
+    if dp then
+        local offered, pickToken = {}, 0
+        F.conns[#F.conns + 1] = dp.OnClientEvent:Connect(function(slot, name, kind)
+            local ds = workspace:FindFirstChild("DungeonSettings")
+            local host = ds and ds:FindFirstChild("Host")
+            if not (host and host.Value == LP.UserId) then return end
+            if kind == "Display" and type(slot) == "number" then
+                offered[slot] = tostring(name)
+            elseif kind == "Reveal" then
+                pickToken = pickToken + 1
+                local my = pickToken
+                task.delay(2, function()
+                    if my ~= pickToken or not cfg.autoPortal then return end
+                    local best, bestR
+                    for s = 1, 3 do
+                        local n = offered[s]
+                        if n then
+                            local r = PORTAL_RANK[n] or 12
+                            if not bestR or r < bestR then best, bestR = s, r end
+                        end
+                    end
+                    if not best then best = 1 end
+                    log(string.format("PORTAL offered %s | %s | %s -> picked %d (%s)", offered[1] or "?", offered[2] or "?", offered[3] or "?", best, offered[best] or "?"))
+                    pcall(function() dp:FireServer(best) end)
+                    offered = {}
+                end)
+            end
+        end)
     end
 end
 
@@ -2057,7 +2106,7 @@ local function dungeonTick()
     else
         swingOn = false
         local p, i, n = nextWaypoint()
-        if p and cfg.dodge and dangerAt(p) then
+        if p and hotAt(p) then
             S.phase = "wait"
             S.target = "red zone on the path"
         elseif p then
@@ -3163,6 +3212,7 @@ UI.choice(fi, "Dodge mode", { "Light", "Full" }, function() return cfg.dodgeMode
     cfg.dodgeMode = v
     cfg.dodge = cfg.dodgeOn and v == "Full" cfg.dodgeLight = cfg.dodgeOn and v == "Light" saveCfg()
 end)
+UI.toggle(fi, "Auto pick portal", get("autoPortal"), set("autoPortal"))
 UI.toggle(fi, "Auto Q / E", get("autoQE"), set("autoQE"))
 UI.toggle(fi, "Boss first", get("bossFirst"), set("bossFirst"))
 

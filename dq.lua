@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_130"
+local VERSION = "dq_131"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -1062,6 +1062,9 @@ local function isDanger(p)
     if not p:IsA("BasePart") then return false end
     -- (DeadlyWhirl / DeadlyVortex are OUR spells - they appear on us when Q/E is used; not dangers. 11-21 14:03)
     if p.Name ~= "Hitbox" and p.Name ~= "Indicator" then return false end
+    -- 11-23 lvl 250 First Sanctuary: boss Zuriel puts a Safezone model (Hitbox 50 ball + Indicator 386 disc) on the floor,
+    -- 5 s later a nuke one-shots everyone outside it (every death on Zuriel). Its parts are the SAFE spot, never a danger.
+    if p.Parent and p.Parent.Name:lower():find("safezone") then return false end
     -- players' own skills carry OwnerUserId (our Q made 30x30 Hitboxes: 1206 dodges from our own skills on 11-21)
     if p:GetAttribute("OwnerUserId") ~= nil or (p.Parent and p.Parent:GetAttribute("OwnerUserId") ~= nil) then return false end
     local c = char()
@@ -1290,7 +1293,12 @@ end
 -- Workspace.SafeZoneHitbox / SafeZoneIndicator (29x32), shown ~5 s before. While one exists: stand in its middle.
 --------------------------------------------------------------------------------
 local safeParts = {}
-local function isSafePart(p) return p:IsA("BasePart") and p.Name:lower():find("safezone") ~= nil end
+local function isSafePart(p)
+    if not p:IsA("BasePart") then return false end
+    if p.Name:lower():find("safezone") then return true end
+    -- 11-23 lvl 250: the Zuriel Safezone is a Model holding Hitbox / Indicator / Primary parts
+    return p.Parent ~= nil and p.Parent:IsA("Model") and p.Parent.Name:lower():find("safezone") ~= nil and (p.Name == "Indicator" or p.Name == "Hitbox")
+end
 F.conns[#F.conns + 1] = workspace.DescendantAdded:Connect(function(p)
     if isSafePart(p) then
         safeParts[p] = os.clock()

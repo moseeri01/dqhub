@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_111"
+local VERSION = "dq_130"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -78,7 +78,7 @@ local DEFAULT = {
     move = "Teleport", tpStep = 60, tpWait = 0.12, tweenSpeed = 60, swingRate = 10, standDist = 4, hover = 10,
     autoQE = true, bossFirst = true, endAction = "Retry", stuckTimeout = 480, lobbyWait = 8,
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
-    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
+    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, keyFail = {}, keyBlock = {}, pendingRun = "", rejoins = {}, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
     badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false, tuneSet = 0,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
@@ -615,7 +615,8 @@ function M.start(opts)
                     lastProgress = os.clock()
                     local s2 = readState()
                     local again = os.time() - (tonumber(s2.stuckAt) or 0) < 600
-                    if again or not onStuck then
+                    -- stuckKick = false (dq 11-23): never kick for S01, the hub recovers (rejoins) every time
+                    if (again and M.cfg.stuckKick ~= false) or not onStuck then
                         s2.stuckAt = 0 writeState(s2)
                         M.kick("S01", "no progress for " .. M.cfg.stuckMin .. " min" .. (again and " (twice in 10 min)" or ""))
                         return
@@ -1274,7 +1275,12 @@ local function safeSpot(from, zone)
             if okSpot(p) then return p end
         end
     end
-    do local up = liftOver(from, dangerAt) if up then return up end end
+    -- 11-23 lvl 220 Neokaze hologram phase: the lift put us 40-50 over the boss for 20 s - no swings, and still hit there.
+    -- Lift only to a spot still in reach of the target (same 40 as bossSpot); else stay and keep hitting.
+    do
+        local up = liftOver(from, dangerAt)
+        if up and (not (curTarget and curTarget.Parent) or (up - curTarget.Position).Magnitude < 40) then return up end
+    end
     -- nowhere clear within 110 studs: stay and keep hitting (the old jump to the map start bounced us
     -- 350 studs back and forth every second on 11-21; flying up dropped us into the void)
     return nil
@@ -2087,6 +2093,22 @@ local function watchDeath()
             -- (a respawn run once died 14 times in a row by flying straight back to the boss).
             log(string.format("DIED (%d this run, streak %d)%s", S.runDeaths, cfg.deathStreak,
                 ""))
+            -- 11-23 Neon Calamity: Mue no Ikari one-shot us every 12 s. Auto best, solo: 6 deaths = this dungeon is too hard,
+            -- count it as a failed run and leave now (not after the 8 min stuck timer)
+            -- 11-23: 6 cut off a Neon Expert run at the last boss (a clear had 5 deaths); 10 = a run that will not finish
+            -- 11-23 First Sanctuary: 10 cut the run while boss Zuriel was still losing hp -> from 10 on, leave only when no
+            -- enemy lost hp in the last 60 s; 20 deaths = leave anyway
+            local nd = S.runDeaths or 0
+            local moving = os.clock() - (S.progressAt or 0) < 60
+            if nd >= 10 and nd < 20 and moving then log("death " .. nd .. " but enemies still losing hp - fighting on") end
+            if nd >= 10 and (not moving or nd >= 20) and not S.deathLeft and cfg.autoBest and cfg.autoJoin and #Players:GetPlayers() <= 1 and S.noteRun then
+                S.deathLeft = true
+                pcall(S.noteRun, false, nd .. " deaths")
+                log(nd .. " deaths -> ReturnLobby")
+                local rl = R("ReturnLobby") if rl then rl:FireServer() end
+                -- 11-23: ReturnLobby was ignored for 2.5 min while we kept dying -> our own teleport after 15 s
+                task.delay(15, function() if F.alive and not IN_LOBBY then log("still here 15 s after ReturnLobby -> teleport") toLobby() end end)
+            end
         end)
     end
 end
@@ -2109,7 +2131,8 @@ local function dungeonTick()
         local btn = sb:FindFirstChild("TextButton")
         if btn and press(btn) then
             log("pressed Start")
-            S.runStart = os.clock() reached = 0 coins0 = coins() S.endJobsDone = false S.routePick = nil
+            S.runStart = os.clock() reached = 0 coins0 = coins() S.endJobsDone = false S.routePick = nil S.autoNextLogged = nil
+            if S.runKey then cfg.pendingRun = S.runKey() saveCfg() end
             task.wait(2)
         end
         return
@@ -2119,6 +2142,10 @@ local function dungeonTick()
     if shown(cs) then
         swingOn = false
         S.phase = "end"
+        if not endSeen and S.noteRun then
+            local f = workspace:FindFirstChild("dungeonFailed")
+            pcall(S.noteRun, not (f and f:IsA("BoolValue") and f.Value), "fail screen")
+        end
         endSeen = endSeen or os.clock()
         -- skill points / equip best / sell / quests also work in the dungeon: do them here, Retry skips the lobby
         if not S.endJobsDone and S.jobs then
@@ -2131,6 +2158,14 @@ local function dungeonTick()
             -- the screen has two copies of Retry / Return (CompletionMain and a smaller panel): take a shown one
             -- after a death never Retry the same dungeon (11-21: Retry looped Sunken Fortress twice into death)
             local want = (cfg.retry and not S.needSell) and "Retry" or "Return"
+            -- auto best: a better (or the failing one's replacement) dungeon is open -> lobby, PlaySolo picks it
+            if want == "Retry" and S.autoNext then
+                local ok, nk = pcall(S.autoNext)
+                if ok and nk then
+                    want = "Return"
+                    if not S.autoNextLogged then S.autoNextLogged = true log("AUTO BEST next " .. nk .. " (now " .. S.runKey() .. ") -> Return") end
+                end
+            end
             local btn, seen = nil, {}
             local root = pgui("CompletionScreen")
             for _, d in ipairs(root and root:GetDescendants() or {}) do
@@ -2148,12 +2183,25 @@ local function dungeonTick()
         return
     end
     endSeen = nil
-    if not S.runStart then S.runStart = os.clock() end
-    -- stuck guard
-    if os.clock() - S.runStart > (tonumber(cfg.stuckTimeout) or 480) then
-        log("STUCK " .. math.floor(os.clock() - S.runStart) .. "s -> ReturnLobby")
+    if not S.runStart then S.runStart = os.clock() S.progressAt = os.clock() S.hpSeen = setmetatable({}, { __mode = "k" }) end
+    -- stuck guard = no enemy lost hp for stuckTimeout s (11-23: a plain 480 s run clock cut off every Neon Chaos run
+    -- while Master Ryuken was still taking damage); a hard cap of 4x stops a run that drags on regardless
+    if os.clock() - (S.hpCheckAt or 0) > 5 then
+        S.hpCheckAt = os.clock()
+        S.hpSeen = S.hpSeen or setmetatable({}, { __mode = "k" })
+        for _, e in ipairs(enemies()) do
+            local was = S.hpSeen[e.m]
+            if was and e.h.Health < was - 1 then S.progressAt = os.clock() end
+            S.hpSeen[e.m] = e.h.Health
+        end
+    end
+    local lim = tonumber(cfg.stuckTimeout) or 480
+    if os.clock() - (S.progressAt or S.runStart) > lim or os.clock() - S.runStart > lim * 4 then
+        log("STUCK " .. math.floor(os.clock() - S.runStart) .. "s run, " .. math.floor(os.clock() - (S.progressAt or S.runStart)) .. "s without damage -> ReturnLobby")
+        if S.noteRun then pcall(S.noteRun, false, "stuck") end
+        task.delay(20, function() if F.alive and not IN_LOBBY then log("still here 20 s after ReturnLobby -> teleport") toLobby() end end)
         local rl = R("ReturnLobby") if rl then rl:FireServer() end
-        S.runStart = os.clock()
+        S.runStart = os.clock() S.progressAt = os.clock()
         return
     end
     local h = hum()
@@ -2241,15 +2289,83 @@ local function dungeonTick()
                     return
                 end
             end
+            -- 11-23 First Sanctuary (StreamingEnabled): after boss Zuriel remainingEnemies = 7 but none sent to us - the
+            -- next room (boss Yaldabaoth) is too far to stream. Ask the game to stream each room marker in turn,
+            -- nearest first; once enemies show up the fight loop goes to them.
+            local remV = workspace:FindFirstChild("Enemies") and workspace.Enemies:FindFirstChild("remainingEnemies")
+            local remN = remV and remV:IsA("ValueBase") and tonumber(remV.Value) or 0
+            if remN > 0 and r and os.clock() - S.noMobSince > 3 and os.clock() > (S.exploreNext or 0) then
+                S.exploreNext = os.clock() + 3
+                S.explored = S.explored or {}
+                -- candidates: DungeonMap models (roomInformation holds no parts on the client). 11-23 test: streaming
+                -- around "circle2" at -60,-135,-1485 brought in all 7 (Archangels + Yaldabaoth room). Arena-like names
+                -- first, nearest first; then every other model, nearest first.
+                local best, bd, bp
+                for pass = 1, 2 do
+                    for _, c in ipairs((workspace:FindFirstChild("DungeonMap") or workspace):GetChildren()) do
+                        if not S.explored[c] and (c:IsA("Model") or c:IsA("BasePart")) then
+                            local nm = c.Name:lower()
+                            local arena = nm:find("circle") or nm:find("boss") or nm:find("arena") or nm:find("entrance")
+                            if pass == 2 or arena then
+                                local ok, p = pcall(function() return c:IsA("BasePart") and c.Position or c:GetPivot().Position end)
+                                if ok and p then
+                                    local d = (p - r.Position).Magnitude
+                                    if d > 150 and (not bd or d < bd) then best, bd, bp = c, d, p end
+                                end
+                            end
+                        end
+                    end
+                    if best then break end
+                end
+                if best then
+                    S.explored[best] = true
+                    log(string.format("EXPLORE %d enemies left, none here -> stream %s at %.0f,%.0f,%.0f (%.0f studs)", remN, best.Name, bp.X, bp.Y, bp.Z, bd))
+                    pcall(function() LP:RequestStreamAroundAsync(bp, 5) end)
+                    local n = #enemies()
+                    if n > 0 then log("EXPLORE found " .. n .. " enemies near " .. best.Name) S.noMobSince = nil return end
+                    S.noMobSince = os.clock() - 3 -- keep exploring; leave only once every marker was tried
+                    return
+                end
+            end
             if os.clock() - S.noMobSince > 25 then
-                log("no mob and no route for 25 s -> ReturnLobby")
+                -- 11-23 First Sanctuary: after boss Zuriel nothing to fight, ReturnLobby ignored 7 times (2.5 min).
+                -- Log once what the map holds (to learn the way on), and after 2 ignored ReturnLobby teleport out.
+                S.noMobTries = (S.noMobTries or 0) + 1
+                if S.noMobTries == 1 then pcall(function()
+                    local o = {}
+                    local en = workspace:FindFirstChild("Enemies")
+                    for _, m in ipairs(en and en:GetChildren() or {}) do
+                        local h = m:FindFirstChildOfClass("Humanoid")
+                        o[#o + 1] = m.Name .. (h and string.format("(%.0fM/%.0fM)", h.Health / 1e6, h.MaxHealth / 1e6) or "")
+                    end
+                    local flags = {}
+                    for _, n in ipairs({ "dungeonStarted", "dungeonFinished", "dungeonFailed" }) do
+                        local v = workspace:FindFirstChild(n) flags[#flags + 1] = n .. "=" .. tostring(v and v.Value)
+                    end
+                    local pads = {}
+                    local tp = workspace:FindFirstChild("Teleports")
+                    for _, p in ipairs(tp and tp:GetChildren() or {}) do pads[#pads + 1] = p.Name .. (S.padUsed and S.padUsed[p] and "(used)" or "") end
+                    local prompts = 0
+                    for _, d in ipairs(workspace:GetDescendants()) do if d:IsA("ProximityPrompt") and d.Enabled then prompts = prompts + 1 end end
+                    local r = hrp()
+                    log("NOMOB map " .. tostring(S.runKey and S.runKey()) .. " | enemies: " .. (#o > 0 and table.concat(o, ", ") or "none") ..
+                        " | " .. table.concat(flags, " ") .. " | pads: " .. (#pads > 0 and table.concat(pads, ",") or "none") ..
+                        " | prompts " .. prompts .. " | me " .. (r and string.format("%.0f,%.0f,%.0f", r.Position.X, r.Position.Y, r.Position.Z) or "-"))
+                end) end
+                if S.noMobTries >= 3 then
+                    log("no mob and no route, ReturnLobby ignored twice -> teleport to lobby")
+                    S.noMobTries = 0
+                    toLobby()
+                else
+                    log("no mob and no route for 25 s -> ReturnLobby")
+                    local rl = R("ReturnLobby") if rl then rl:FireServer() end
+                end
                 S.noMobSince = nil
-                local rl = R("ReturnLobby") if rl then rl:FireServer() end
             end
             return
         end
     end
-    S.noMobSince = nil
+    S.noMobSince = nil S.noMobTries = 0
 end
 
 --------------------------------------------------------------------------------
@@ -2276,21 +2392,47 @@ local DIFFS = { "Normal", "Expert", "Chaos", "Calamity" }
 local function myLevel() local d = LP:FindFirstChild("data") return d and num(d:FindFirstChild("level")) or 1 end
 
 S.refused = {} -- map|diff the server would not start in this lobby (PlaySolo sent, no teleport)
+-- 11-23 owner: "auto best should climb through every dungeon so I can leave it overnight".
+-- Fight-only runs finish without a route (lvl 180-220 all night), so every open map counts now.
+-- A dungeon that fails twice in a row (STUCK or the game's fail screen) is skipped for 4 h -> the next one down.
+cfg.keyFail = type(cfg.keyFail) == "table" and cfg.keyFail or {}
+cfg.keyBlock = type(cfg.keyBlock) == "table" and cfg.keyBlock or {}
+local function runKey()
+    local ds = workspace:FindFirstChild("DungeonSettings")
+    local sn, df = ds and ds:FindFirstChild("SessionName"), ds and ds:FindFirstChild("Difficulty")
+    if sn and df and tostring(sn.Value) ~= "" and tostring(df.Value) ~= "" then return tostring(sn.Value) .. "|" .. tostring(df.Value) end
+    return curKey()
+end
+local function noteRun(ok, why, key)
+    local k = key or runKey()
+    cfg.pendingRun = ""
+    if ok then
+        cfg.keyFail[k] = 0 saveCfg()
+        return
+    end
+    cfg.keyFail[k] = (cfg.keyFail[k] or 0) + 1
+    log(string.format("RUN FAILED %s (%s) - %d in a row", k, why, cfg.keyFail[k]))
+    if cfg.keyFail[k] >= 2 then
+        cfg.keyFail[k] = 0
+        cfg.keyBlock[k] = os.time() + 4 * 3600
+        log("AUTO BEST: " .. k .. " failed twice - skipped for 4 h")
+    end
+    saveCfg()
+end
 local function bestDungeon()
     local lvl = myLevel()
     local list = {}
-    -- MAP_REQ runs from easy to hard, so the last open one with a route is the best
+    -- MAP_REQ runs from easy to hard, so the last open one is the best
     for _, m in ipairs(MAP_REQ) do
         for _, d in ipairs(DIFFS) do
             local key = m.map .. "|" .. d
-            if lvl >= m.req[d] and routeFor(key) and not S.refused[key] then
+            if lvl >= m.req[d] and not S.refused[key] and os.time() >= (tonumber(cfg.keyBlock[key]) or 0) then
                 list[#list + 1] = { map = m.map, diff = d, need = m.req[d] }
             end
         end
     end
-    if #list == 0 then return cfg.map, cfg.difficulty, "no route map open" end
-    -- two deaths in a row: one step easier until a clean clear
-    local pick = list[math.max(1, #list - ((tonumber(cfg.deathStreak) or 0) >= 2 and 1 or 0))]
+    if #list == 0 then return cfg.map, cfg.difficulty, "no map open" end
+    local pick = list[#list]
     return pick.map, pick.diff, string.format("lvl %d, needs %d", lvl, pick.need)
 end
 
@@ -2323,6 +2465,45 @@ local function playing(manual)
     for i, x in ipairs(DIFFS) do if x == d then idx = i end end
     while idx > 1 and S.refused[cfg.map .. "|" .. DIFFS[idx]] do idx = idx - 1 end
     return cfg.map, DIFFS[idx]
+end
+S.runKey = runKey
+-- 11-23 First Sanctuary: the game sent us to the lobby twice mid-run (9.5 and 13 min in, no fail screen).
+-- Log the dungeon room counters whenever they change, to see whether a timer or a lives count ends the run.
+if not IN_LOBBY then go("roominfo", function()
+    local last, lastT = "", nil
+    while F.alive do
+        local ri = workspace:FindFirstChild("roomInformation")
+        if ri then
+            local t = {}
+            for _, n in ipairs({ "currentRoom", "timeLeft", "playersLeft" }) do
+                local v = ri:FindFirstChild(n) t[#t + 1] = n .. "=" .. tostring(v and v.Value)
+            end
+            local cur = table.concat(t, " ")
+            local tl = ri:FindFirstChild("timeLeft")
+            local key = cur:gsub("timeLeft=%d+", "") -- log a timer tick only every 60 s
+            local tv = tl and tonumber(tl.Value)
+            if key ~= last or (tv and tv ~= lastT and tv % 60 == 0) then log("ROOMINFO " .. cur) last = key end
+            lastT = tv
+        end
+        task.wait(1)
+    end
+end) end
+S.noteRun = noteRun
+-- 11-23: 3 deaths in Neon Calamity sent us to the lobby with no fail screen. A run we started and never saw end
+-- (cfg.pendingRun, set at Start) counts as a fail when the script wakes up in the lobby.
+if IN_LOBBY and type(cfg.pendingRun) == "string" and cfg.pendingRun ~= "" then
+    noteRun(false, "back in the lobby without a finish", cfg.pendingRun)
+elseif not IN_LOBBY then
+    cfg.pendingRun = runKey() saveCfg()
+end
+-- end screen: the dungeon auto best wants now, if it is not the one we just played (solo + Auto join only:
+-- the lobby has to start the next one, and a party run stays with the friends)
+S.autoNext = function()
+    if not (cfg.autoBest and cfg.autoJoin) or (cfg.mode or "Dungeons") ~= "Dungeons" or #Players:GetPlayers() > 1 then return nil end
+    local m, d = bestDungeon()
+    local k = m .. "|" .. d
+    if k ~= runKey() then return k end
+    return nil
 end
 
 --------------------------------------------------------------------------------
@@ -2537,7 +2718,7 @@ S.jobs = lobbyJobs -- the end screen in the dungeon calls it too
 local jobsDone = false
 -- the lobby opens on the "Your Characters" menu (PlayerGui.LoadingScreen); nothing starts until a slot is picked.
 -- Same call as its Play button: SelectCharacterSlot(slot). "Couldn't load. Please rejoin." -> teleport to the lobby again.
-local menuTries, menuLast = 0, 0
+local menuTries, menuLast = 0, os.clock() -- start the clock at load: with 0 the first press fired at once (11-23 loop)
 local function menuStep()
     local ls = pgui("LoadingScreen")
     if not ls or not ls.Enabled then return false end
@@ -2562,13 +2743,27 @@ local function menuStep()
     -- the game's own Play button fires ONCE and then shows LOADING... (the server teleports us). Firing again while that
     -- teleport runs looks like what hung the loading screen (11-21 13:58: two picks 15 s apart, then stuck). Once, then 60 s.
     if LP:GetAttribute("IsTeleporting") == true then S.target = "teleporting..." return true end
-    if os.clock() - menuLast > (menuTries == 0 and 3 or 60) then
+    if os.clock() - menuLast > (menuTries == 0 and 40 or 45) then
         menuLast = os.clock()
         menuTries = menuTries + 1
-        local slot = tonumber(LP:GetAttribute("ActiveCharacterSlot")) or 1
-        local r = R("SelectCharacterSlot")
-        if r then r:FireServer(slot) log("MENU pick character slot " .. slot .. " (try " .. menuTries .. ")") end
-        if menuTries >= 4 then menuTries = 0 log("MENU still up after 4 tries -> rejoin lobby") toLobby() end
+        -- 11-23 night: pressing PLAY first looped 03:15-06:51 (100+ rejoins, never got in); SelectCharacterSlot got
+        -- Exitta in on the first try at 02:50 (its 02:00 failure was the alt account with no character at all).
+        -- So: remote first, the PLAY button only on the second try.
+        local played = false
+        if menuTries >= 2 then
+            for _, d in ipairs(menu:GetDescendants()) do
+                if d:IsA("TextLabel") and d.Text == "PLAY" and shown(d) then
+                    local b = d:IsA("GuiButton") and d or d:FindFirstAncestorWhichIsA("GuiButton") or d.Parent:FindFirstChildWhichIsA("GuiButton")
+                    if b and press(b) then played = true log("MENU pressed PLAY (try " .. menuTries .. ")") break end
+                end
+            end
+        end
+        if not played then
+            local slot = tonumber(LP:GetAttribute("ActiveCharacterSlot")) or 1
+            local r = R("SelectCharacterSlot")
+            if r then r:FireServer(slot) log("MENU pick character slot " .. slot .. " (try " .. menuTries .. ")") end
+        end
+        if menuTries >= 2 then menuTries = 0 log("MENU still up after 2 tries -> rejoin lobby") toLobby() end
     end
     S.target = "character menu"
     return true
@@ -2600,8 +2795,12 @@ local function lobbyTick()
         -- (no more farm OFF here: a hand-picked dungeon the server keeps refusing steps down one difficulty, see playing())
         return
     end
+    -- 11-23: the game's DungeonHandler sends LevelRequirement = DungeonInfo DifficultyReqs[Difficulty]; with 1 the server
+    -- ignored every PlaySolo above Raided Village (all refused since 11-22 14:53)
+    local need = 1
+    for _, m in ipairs(MAP_REQ) do if m.map == map and m.req[diff] then need = m.req[diff] end end
     local t = { Map = map, Calamity = false, Hardcore = hc, NoHit = false,
-        Difficulty = diff, LevelRequirement = 1, Tier = 1, Private = false, Easter = false }
+        Difficulty = diff, LevelRequirement = need, Tier = 1, Private = false, Easter = false }
     log("PlaySolo " .. map .. " " .. diff .. (hc and " hardcore" or "") .. " (try " .. S.tries[key] .. ")")
     -- why does the server sometimes not start it? note our state + listen for any answer (once per lobby)
     pcall(function()
@@ -2692,6 +2891,22 @@ local function onKick(msg)
         local out = { os.date("%Y-%m-%d %H:%M:%S") .. " " .. VERSION .. " place " .. tostring(game.PlaceId) .. " players " .. #Players:GetPlayers(), "message: " .. msg }
         for i = math.max(1, #L - 149), #L do out[#out + 1] = L[i] end
         pcall(function() if not isfolder(DIR) then makefolder(DIR) end writefile(DIR .. "/lastkick.txt", table.concat(out, "\n")) end)
+        -- owner 11-23: "if it drops again, get back into a map by itself". Rejoin the lobby after 10 s (the loader runs
+        -- again there and Auto join starts the next dungeon). Not after a staff kick [S03] or the game's anti-cheat #101,
+        -- and at most 3 rejoins an hour (a kick loop stays on the kick screen).
+        if not S.rejoinSet and not msg:find("S03") and not msg:find("101") and not msg:find("TEST") then
+            S.rejoinSet = true
+            local now, keep = os.time(), {}
+            for _, t in ipairs(type(cfg.rejoins) == "table" and cfg.rejoins or {}) do if now - (tonumber(t) or 0) < 3600 then keep[#keep + 1] = t end end
+            if #keep < 3 then
+                keep[#keep + 1] = now
+                cfg.rejoins = keep saveCfg()
+                log("REJOIN in 10 s (" .. #keep .. " this hour)")
+                task.delay(10, function() pcall(function() TeleportService:Teleport(LOBBY_PLACE, LP) end) end)
+            else
+                log("REJOIN skipped: already 3 this hour")
+            end
+        end
         -- and post it to the owner's Discord data channel like AA does (owner 11-21: "no need for friends to open files").
         -- One "DQKICK" message per kick; the AA stats bot reads only AASTAT / AAITEM / AABR lines, so it skips these.
         if S.kickSent then return end
@@ -2747,6 +2962,7 @@ task.spawn(function()
     S.shareUrl = ok and type(u) == "string" and u:match("https://[%w%./_%-]+") or nil
 end)
 local Safe = MSafe.start({ name = "moseeri dungeon", onLog = log, onStuck = function() toLobby() end,
+    stuckKick = false, -- owner 11-23: no "please rejoin" screen at night; every stall = back to a fresh lobby
     stuckMin = tonumber(cfg.stuckMin) or 3,
     pullbackMax = 25, -- our own hover / hold corrections show up as pull-backs too (about 1 a minute), so higher than default
     enabled = true })

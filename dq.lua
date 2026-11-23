@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_131"
+local VERSION = "dq_139"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -78,7 +78,7 @@ local DEFAULT = {
     move = "Teleport", tpStep = 60, tpWait = 0.12, tweenSpeed = 60, swingRate = 10, standDist = 4, hover = 10,
     autoQE = true, bossFirst = true, endAction = "Retry", stuckTimeout = 480, lobbyWait = 8,
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
-    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, keyFail = {}, keyBlock = {}, pendingRun = "", rejoins = {}, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
+    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, impTry = "Lunar", impBox = false, exploreHits = {}, keyFail = {}, keyBlock = {}, pendingRun = "", rejoins = {}, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
     badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false, tuneSet = 0,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
@@ -1385,6 +1385,176 @@ do
             log(string.format("ROSE gone after %.0fs", os.clock() - t0))
         end)
     end)
+    -- 11-23 DEV: lvl 250 boss Ephrath one-shots us once a run: Ring -> ImperiumAttack (Solar / Lunar parts, 187x166)
+    -- + MiddleCircle + Line -> ~4 s later full hp hit "in zone: none". Record every part of it and where we stand.
+    F.conns[#F.conns + 1] = workspace.ChildAdded:Connect(function(o)
+        if not DEV or IN_LOBBY or (o.Name ~= "ImperiumAttack" and o.Name ~= "MiddleCircle") then return end
+        -- 13:16 record: 4 boxes 187x20x166 around the boss, Solar / Lunar in a checkerboard, a red MiddleCircle Hitbox
+        -- in the centre; hovering above the centre = dead at 5.0 s. Try standing on the floor inside one kind of box;
+        -- died -> try the other kind next time (cfg.impTry), survived -> keep it.
+        if o.Name == "ImperiumAttack" then go("imperiumGo", function()
+            task.wait(0.1)
+            local want = cfg.impTry == "Solar" and "Solar" or "Lunar"
+            local mark = ""
+            pcall(function()
+                local c = char()
+                for k, v in pairs(c and c:GetAttributes() or {}) do mark = mark .. k .. "=" .. tostring(v) .. " " end
+                for _, d in ipairs(c and c:GetDescendants() or {}) do
+                    local n = d.Name:lower() if n:find("solar") or n:find("lunar") or n:find("sun") or n:find("moon") then mark = mark .. "[" .. d.Name .. "] " end
+                end
+            end)
+            local r = hrp()
+            local best, bd
+            for _, b in ipairs(o:GetChildren()) do
+                if b:IsA("BasePart") and b.Name == want and r then
+                    local d = (flat(b.Position) - flat(r.Position)).Magnitude
+                    if not bd or d < bd then best, bd = b, d end
+                end
+            end
+            -- owner 13:20 (his brother): this is an event - mash Q and E. Press the real keys like a player for 6 s,
+            -- and log what the screen says. The box move stays off (cfg.impBox) so we learn which one saves us.
+            go("imperiumKeys", function()
+                local vim = game:GetService("VirtualInputManager")
+                local t1 = os.clock()
+                local n = 0
+                while F.alive and o.Parent and os.clock() - t1 < 6 do
+                    for _, k in ipairs({ Enum.KeyCode.Q, Enum.KeyCode.E }) do
+                        pcall(function() vim:SendKeyEvent(true, k, false, game) vim:SendKeyEvent(false, k, false, game) end)
+                        n = n + 1
+                    end
+                    if n == 20 then pcall(function()
+                        local t = {}
+                        for _, d in ipairs(LP.PlayerGui:GetDescendants()) do
+                            if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible and #d.Text > 0 and #d.Text < 60 then
+                                local g = d:FindFirstAncestorWhichIsA("ScreenGui")
+                                if g and g.Enabled and not ({ QuestUi = 1, Inventory = 1, cosmeticsGui = 1, ItemIndex = 1, NewSettings = 1, HowToPlay = 1, PlayNew = 1, Portals = 1, Loading = 1, InfiniteRejoin = 1, CompletionScreen = 1 })[g.Name] then
+                                    t[#t + 1] = g.Name .. ":" .. d.Text
+                                end
+                            end
+                            if #t > 25 then break end
+                        end
+                        log("IMPERIUM screen: " .. table.concat(t, " | "))
+                    end) end
+                    task.wait(0.06)
+                end
+                log("IMPERIUM mashed Q/E " .. n .. " times")
+            end)
+            -- 13:41 record: the MiddleCircle.Circle (light blue, ~73 wide, on the floor under the boss) fades IN during
+            -- the move (tr 1 -> 0.75 -> 0.30) = the spot the game shows. Boxes: Lunar died, Solar died (hit at 3 s and 5 s).
+            -- 13:48: middle circle = dead at 2.8 s (Line beams + MiddleCircle hitbox). Every spot inside the 4 boxes
+            -- took the 5 s hit -> try outside them: 4 spots just past the boxes' outer edge, on a floor found by raycast.
+            if cfg.impTry == "Out" and cfg.impBox then
+                local bmin, bmax
+                for _, b in ipairs(o:GetChildren()) do
+                    if b:IsA("BasePart") then
+                        local lo, hi = b.Position - b.Size / 2, b.Position + b.Size / 2
+                        bmin = bmin and Vector3.new(math.min(bmin.X, lo.X), 0, math.min(bmin.Z, lo.Z)) or Vector3.new(lo.X, 0, lo.Z)
+                        bmax = bmax and Vector3.new(math.max(bmax.X, hi.X), 0, math.max(bmax.Z, hi.Z)) or Vector3.new(hi.X, 0, hi.Z)
+                    end
+                end
+                local r0 = hrp()
+                if bmin and r0 then
+                    local cx, cz, y0 = (bmin.X + bmax.X) / 2, (bmin.Z + bmax.Z) / 2, r0.Position.Y
+                    local cands = { Vector3.new(bmax.X + 20, y0, cz), Vector3.new(bmin.X - 20, y0, cz), Vector3.new(cx, y0, bmax.Z + 20), Vector3.new(cx, y0, bmin.Z - 20) }
+                    local rp = RaycastParams.new() rp.FilterType = Enum.RaycastFilterType.Exclude
+                    rp.FilterDescendantsInstances = { char(), o, workspace:FindFirstChild("Enemies") }
+                    local spot
+                    for _, c in ipairs(cands) do
+                        local hit = workspace:Raycast(c + Vector3.new(0, 60, 0), Vector3.new(0, -200, 0), rp)
+                        if hit and hit.Instance and hit.Instance.CanCollide then spot = hit.Position + Vector3.new(0, 3, 0) break end
+                    end
+                    if spot then
+                        S.impSpot = spot
+                        log(string.format("IMPERIUM try outside the boxes at %s (boxes %s..%s)", v3s(spot), v3s(bmin), v3s(bmax)))
+                        local died = false
+                        local h = hum()
+                        local c1 = h and h.Died:Connect(function() died = true end)
+                        local t0 = os.clock()
+                        while F.alive and o.Parent and os.clock() - t0 < 9 do task.wait(0.2) end
+                        S.impSpot = nil
+                        if c1 then c1:Disconnect() end
+                        log("IMPERIUM outside the boxes: " .. (died and "DIED" or "SURVIVED"))
+                        return
+                    end
+                    log("IMPERIUM outside: no floor past any box edge")
+                end
+            end
+            if cfg.impTry == "Middle" and cfg.impBox then
+                local mc = workspace:FindFirstChild("MiddleCircle") or workspace:WaitForChild("MiddleCircle", 1.5)
+                local circ = mc and (mc:FindFirstChild("Circle") or mc:FindFirstChild("Hitbox"))
+                if circ then
+                    S.impSpot = Vector3.new(circ.Position.X, circ.Position.Y + 4, circ.Position.Z)
+                    log(string.format("IMPERIUM try the middle circle at %s", v3s(S.impSpot)))
+                    local died = false
+                    local h = hum()
+                    local c1 = h and h.Died:Connect(function() died = true end)
+                    local t0 = os.clock()
+                    while F.alive and o.Parent and os.clock() - t0 < 9 do task.wait(0.2) end
+                    S.impSpot = nil
+                    if c1 then c1:Disconnect() end
+                    log("IMPERIUM middle circle: " .. (died and "DIED" or "SURVIVED"))
+                    return
+                end
+            end
+            if not best or not cfg.impBox then best = nil end
+            if not best then
+                local died = false
+                local h = hum()
+                local c1 = h and h.Died:Connect(function() died = true end)
+                local t0 = os.clock()
+                while F.alive and o.Parent and os.clock() - t0 < 9 do task.wait(0.2) end
+                if c1 then c1:Disconnect() end
+                log("IMPERIUM with Q/E mashing: " .. (died and "DIED" or "SURVIVED"))
+                return
+            end
+            local ind = best:FindFirstChild("Indicator")
+            -- inner corner side of the box would be next to the boss; aim at the box centre on the floor
+            S.impSpot = Vector3.new(best.Position.X, (ind and ind.Position.Y or best.Position.Y - 9) + 3, best.Position.Z)
+            log(string.format("IMPERIUM try %s box at %s (char marks: %s)", want, v3s(S.impSpot), mark ~= "" and mark or "none"))
+            local died = false
+            local h = hum()
+            local c1 = h and h.Died:Connect(function() died = true end)
+            local t0 = os.clock()
+            while F.alive and o.Parent and os.clock() - t0 < 9 do task.wait(0.2) end
+            S.impSpot = nil
+            if c1 then c1:Disconnect() end
+            if died then
+                cfg.impTry = (want == "Lunar") and "Solar" or "Lunar" saveCfg()
+                log("IMPERIUM died in the " .. want .. " box - next time " .. cfg.impTry)
+            else
+                cfg.impTry = want saveCfg()
+                log("IMPERIUM survived in the " .. want .. " box - keep it")
+            end
+        end) end
+        go("imperium", function()
+            task.wait(0.2)
+            local t0 = os.clock()
+            local L = { os.date("%H:%M:%S") .. " " .. o.Name }
+            local function dump(tag)
+                for _, d in ipairs(o:GetDescendants()) do
+                    if d:IsA("BasePart") then
+                        L[#L + 1] = string.format("  %s %s %s size %s pos %s up %s tr %.2f col %s", tag, d:GetFullName():gsub("^Workspace%.", ""), d.ClassName, v3s(d.Size), v3s(d.Position), v3s(d.CFrame.UpVector * 10), d.Transparency, tostring(d.Color))
+                    end
+                end
+                for k, v in pairs(o:GetAttributes()) do L[#L + 1] = "  attr " .. k .. "=" .. tostring(v) end
+            end
+            dump("t0")
+            local dumped = {}
+            while F.alive and o.Parent and os.clock() - t0 < 8 do
+                for _, ts in ipairs({ 2, 4, 4.8 }) do
+                    if not dumped[ts] and os.clock() - t0 >= ts then dumped[ts] = true dump("t" .. ts) end
+                end
+                local r, h = hrp(), hum()
+                local boss
+                for _, e in ipairs(enemies()) do if e.m.Name == "Ephrath" then boss = e.r.Position end end
+                L[#L + 1] = string.format("  %.1fs me %s hp %.0fM | Ephrath %s", os.clock() - t0, r and v3s(r.Position) or "-", h and h.Health / 1e6 or -1, boss and v3s(boss) or "-")
+                task.wait(0.5)
+            end
+            L[#L + 1] = string.format("  gone after %.1fs", os.clock() - t0)
+            pcall(appendfile, DIR .. "/imperium.txt", table.concat(L, "\n") .. "\n\n")
+            log("IMPERIUM recorded " .. o.Name .. " -> dq/imperium.txt")
+        end)
+    end)
     -- 11-22 DEV: lvl 220 Neon District last boss Mue no Ikari - FloorLava (Hitbox 50x444x528) covers the whole arena,
     -- no dodge spot is ever clear and we die 6+ times. Record the zone's frame, the floor under us and the boss each second.
     F.conns[#F.conns + 1] = workspace.DescendantAdded:Connect(function(o)
@@ -1429,7 +1599,7 @@ local zoneWorthDodging -- set further down (needs the learned threat table)
 local function dodgeCheck()
     if IN_LOBBY then return false end
     do -- safe zone beats everything else, red zones included
-        local sp = safeZone()
+        local sp = safeZone() or S.impSpot
         if sp then
             local r0 = hrp()
             if r0 and (flat(r0.Position) - flat(sp)).Magnitude > 5 then
@@ -1858,6 +2028,14 @@ local function engage(e)
     local r = hrp()
     if not r then return end
     if S.movingUntil and os.clock() < S.movingUntil then return end -- a stepped dodge is still moving us
+    -- 11-23 Ephrath test: while we hold a mechanic spot, the fight must not pull us back to the boss
+    -- (13:29: we flicked between the box and the hover spot, at 4.6 s outside the box)
+    if S.impSpot then
+        swingOn = false hold = nil
+        local r0 = hrp()
+        if r0 and (r0.Position - S.impSpot).Magnitude > 3 then setCF(CFrame.new(S.impSpot)) end
+        return
+    end
     -- decoy check: same target for 6 s of swinging and its hp has not dropped -> skip it for 20 s
     do
         local now = os.clock()
@@ -2309,6 +2487,31 @@ local function dungeonTick()
                 -- around "circle2" at -60,-135,-1485 brought in all 7 (Archangels + Yaldabaoth room). Arena-like names
                 -- first, nearest first; then every other model, nearest first.
                 local best, bd, bp
+                -- 11-23 15:00: each run spent ~50 s here (6 + 10 + 3 tries, the same spots every run). Spots that found
+                -- enemies before on this map come first (cfg.exploreHits[map] = {"x,y,z", ...}), nearest first.
+                local mapName = workspace:FindFirstChild("DungeonSettings") and workspace.DungeonSettings:FindFirstChild("SessionName")
+                mapName = mapName and tostring(mapName.Value) or "?"
+                cfg.exploreHits = type(cfg.exploreHits) == "table" and cfg.exploreHits or {}
+                S.exploredSpot = S.exploredSpot or {}
+                for _, s in ipairs(cfg.exploreHits[mapName] or {}) do
+                    if not S.exploredSpot[s] then
+                        local x, y, z = s:match("^(-?%d+),(-?%d+),(-?%d+)$")
+                        local p = x and Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+                        if p then
+                            local d = (p - r.Position).Magnitude
+                            if d > 150 and (not bd or d < bd) then best, bd, bp = s, d, p end
+                        end
+                    end
+                end
+                if best then
+                    S.exploredSpot[best] = true
+                    log(string.format("EXPLORE %d enemies left -> known spot %s (%.0f studs)", remN, best, bd))
+                    pcall(function() LP:RequestStreamAroundAsync(bp, 5) end)
+                    local n = #enemies()
+                    if n > 0 then log("EXPLORE found " .. n .. " enemies at the known spot") S.noMobSince = nil return end
+                    S.noMobSince = os.clock() - 3
+                    return
+                end
                 for pass = 1, 2 do
                     for _, c in ipairs((workspace:FindFirstChild("DungeonMap") or workspace):GetChildren()) do
                         if not S.explored[c] and (c:IsA("Model") or c:IsA("BasePart")) then
@@ -2330,7 +2533,14 @@ local function dungeonTick()
                     log(string.format("EXPLORE %d enemies left, none here -> stream %s at %.0f,%.0f,%.0f (%.0f studs)", remN, best.Name, bp.X, bp.Y, bp.Z, bd))
                     pcall(function() LP:RequestStreamAroundAsync(bp, 5) end)
                     local n = #enemies()
-                    if n > 0 then log("EXPLORE found " .. n .. " enemies near " .. best.Name) S.noMobSince = nil return end
+                    if n > 0 then
+                        log("EXPLORE found " .. n .. " enemies near " .. best.Name)
+                        local key = string.format("%d,%d,%d", math.floor(bp.X + 0.5), math.floor(bp.Y + 0.5), math.floor(bp.Z + 0.5))
+                        local list = cfg.exploreHits[mapName] or {}
+                        local have = false for _, s in ipairs(list) do if s == key then have = true end end
+                        if not have and #list < 12 then list[#list + 1] = key cfg.exploreHits[mapName] = list saveCfg() log("EXPLORE remembered " .. key .. " for " .. mapName) end
+                        S.noMobSince = nil return
+                    end
                     S.noMobSince = os.clock() - 3 -- keep exploring; leave only once every marker was tried
                     return
                 end

@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_183"
+local VERSION = "dq_192"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -78,7 +78,7 @@ local DEFAULT = {
     move = "Teleport", tpStep = 60, tpWait = 0.12, tweenSpeed = 60, swingRate = 10, standDist = 4, hover = 10,
     autoQE = true, bossFirst = true, endAction = "Retry", stuckTimeout = 480, lobbyWait = 8,
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
-    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, standOff = 0, exactZones = true, carrySpots = {}, impTry = "Lunar", impBox = false, exploreHits = {}, keyFail = {}, keyBlock = {}, pendingRun = "", rejoins = {}, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
+    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, standOff = 0, exactZones = true, carrySpots = {}, noHit = false, impTry = "Lunar", impBox = false, exploreHits = {}, keyFail = {}, keyBlock = {}, pendingRun = "", rejoins = {}, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
     badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false, tuneSet = 0,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
@@ -843,6 +843,7 @@ local function setCF(cf)
     end
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = cf
+    S.ownSetT = os.clock() -- dq_184: for the dev flight recorder (who moved us?)
     S.floatY = cf.Position.Y -- dq_161: keep this height until the next move
     hold = nil -- a real move ends any hover hold (old hold pulled us back to the last mob)
     lastSet = { pos = cf.Position, t = os.clock() }
@@ -1103,6 +1104,52 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     if v.Y < 0 then r.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z) end
     if dy > 0.3 then r.CFrame = r.CFrame + Vector3.new(0, dy, 0) end
 end)
+-- dq_184 dev PC only: flight recorder. Twice a run or so something flies us ~500 studs a second away from a pack we
+-- just reached and the mobs' chase boxes kill us on the way (11-24 12:27, 13:43). The last 3 s of our position (own
+-- move or not, nearest Spawn / Teleport part) go to dq/flight.txt on every death and whenever we travel 150+ studs in
+-- 0.6 s without a move of our own.
+if DEV then
+    local buf = {}
+    S.dumpFlight = function(tag)
+        local L = { os.date("%H:%M:%S") .. " " .. tag }
+        local parts = {}
+        for _, nm in ipairs({ "Spawns", "Teleports" }) do
+            local f = workspace:FindFirstChild(nm)
+            for _, d in ipairs(f and f:GetDescendants() or {}) do if d:IsA("BasePart") then parts[#parts + 1] = d end end
+        end
+        local function near(q)
+            local best, bd
+            for _, d in ipairs(parts) do local x = (d.Position - q).Magnitude if not bd or x < bd then best, bd = d, x end end
+            return best and string.format("%s %.0f", best.Name, bd) or "-"
+        end
+        local t1 = buf[#buf] and buf[#buf].t or os.clock()
+        for i = 1, #buf, 3 do
+            local b, prev = buf[i], buf[math.max(1, i - 3)]
+            L[#L + 1] = string.format("  %.2f %s step %.0f %s | near %s", b.t - t1, v3s(b.p), (b.p - prev.p).Magnitude, b.own and "OWN" or "ext", near(b.p))
+        end
+        pcall(appendfile, DIR .. "/flight.txt", table.concat(L, "\n") .. "\n\n")
+        log("FLIGHT recorded (" .. tag .. ") -> dq/flight.txt")
+    end
+    F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
+        if IN_LOBBY then return end
+        local r = hrp()
+        if not r then return end
+        local now = os.clock()
+        buf[#buf + 1] = { t = now, p = r.Position, own = (S.ownSetT and now - S.ownSetT < 0.2) and true or false }
+        if #buf > 200 then table.remove(buf, 1) end
+        if #buf > 40 and now - (S.flightDumpT or 0) > 6 then
+            local a = buf[#buf - 36]
+            if (r.Position - a.p).Magnitude > 150 then
+                local own = 0
+                for i = #buf - 36, #buf do if buf[i].own then own = own + 1 end end
+                if own == 0 then
+                    S.flightDumpT = now
+                    pcall(S.dumpFlight, "moved " .. math.floor((r.Position - a.p).Magnitude) .. " studs in 0.6 s with no move of ours")
+                end
+            end
+        end
+    end)
+end
 
 --------------------------------------------------------------------------------
 -- dodge: mobs build a red Indicator + a Hitbox part before a skill lands (Aftershock, rapidfire, TargetBeam,
@@ -1216,6 +1263,7 @@ local function pizzaCentre(folder)
     sliceCentre[folder] = { v = v, t = os.clock() }
     return v
 end
+S.pizzaCentreOf = pizzaCentre
 inSlice = function(pos, p, margin)
     local folder = p.Parent and p.Parent.Parent
     if not folder or folder.Name ~= "Slices" then return nil end
@@ -1334,7 +1382,13 @@ local function inZone(pos, p, margin)
     -- right behind the boss over the Primary, or right in front of it), at any height (21-74 over the lane box);
     -- 8 or more studs to the side of that line: 0 hits in 22. The sword cuts along the vertical plane through the lane's
     -- axis. So: 6 studs (+ margin) to each side of that plane, the whole lane long, at any height.
-    if p.Parent and p.Parent.Name == "BigSword" and math.abs(lp.X) <= 6 + m and math.abs(lp.Z) <= p.Size.Z / 2 + m then return true end
+    -- dq_185: 190 swords since the plane rule (dq/form.txt, 13:42-15:36): beside the line (8-19 studs off it) at the
+    -- usual hover = 5 hits in 78; the same spots but 40+ studs over the lane box = 0 in 49; 20+ studs off the line = 0 in 22.
+    -- So next to the lane (within 20 studs of its middle line) only a spot 40+ over the lane box is clear.
+    if p.Parent and p.Parent.Name == "BigSword" and math.abs(lp.Z) <= p.Size.Z / 2 + m then
+        if math.abs(lp.X) <= 6 + m then return true end
+        if math.abs(lp.X) <= 20 + m and lp.Y - p.Size.Y / 2 < 40 + m then return true end
+    end
     -- dq_172 Formless EmberwingLingerLine (Hitbox 858x34x36, Indicator 858x12x36): two 37 % hits 24 studs over the top of
     -- the Indicator, 11 s after it showed (ZONEMISS 11-24 11:05) - the line keeps burning and reaches higher than its parts
     if p.Parent and p.Parent.Name == "EmberwingLingerLine" then hy = math.max(hy, 50) end
@@ -1375,7 +1429,10 @@ local function dangerAt(pos)
         -- dq_181: the Illusive chase boxes (plain workspace Hitbox 50x30x30) hit 8 studs outside their part (74 % of our
         -- hp, 11-24 13:03, ZONEMISS "out x-3 y8 z-13 age 1.2s"): 12 around them instead of 6
         local mg = nil
-        if p.Parent and p.Parent.Name == "StaticRing" then mg = 16 elseif p.Parent == workspace and p.Name == "Hitbox" then mg = 12 end
+        -- dq_188: 12 -> 20. No Hit attempt 3 (11-24 16:01) died 4 s after reaching the room-7 pack: three small dodges
+        -- (28 up, 32 and 47 sideways) in 0.8 s, the last one 0.09 s before the box struck - too little, too late for the
+        -- server. 20 studs of margin makes the first dodge a real one (45+ studs from the box centre).
+        if p.Parent and p.Parent.Name == "StaticRing" then mg = 16 elseif p.Parent == workspace and p.Name == "Hitbox" then mg = 20 end
         if inZone(pos, p, mg) then return p end
         local v = zoneVel[p]
         if v and (inZone(pos - v * 0.3, p) or inZone(pos - v * 0.6, p)) then return p end
@@ -1455,7 +1512,56 @@ S.edgeSpot = function(p)
     end
     return nil
 end
+-- dq_192 Pan Ku (Boss Rush 11-24, dq/yinyang.txt): the floor is a turning yin-yang (Workspace.YinYangArena: YinHitbox /
+-- YangHitbox, 248 wide meshes) and the player carries an "Alignment" attribute (Yin / Yang). Over the half of our own
+-- alignment nothing happens (8-10 s stretches, 0 ticks); over the other half the game takes 25% of max hp every
+-- second (13 ticks seen, every one within a second of being over the wrong half) - 4 ticks = dead, 9 deaths in 3 runs.
+-- The halves turn ~12-17 degrees a second, so the spot has to follow. A ray straight down at one half's hitbox mesh
+-- tells which half a point is over.
+do
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
+    local cache, cacheT, cacheH = {}, 0, nil
+    -- our half's hitbox while the arena is up (nil = no arena / no alignment)
+    S.yy = function()
+        local ya = workspace:FindFirstChild("YinYangArena")
+        if not ya then return nil end
+        local al = LP:GetAttribute("Alignment")
+        if al ~= "Yin" and al ~= "Yang" then return nil end
+        local h = ya:FindFirstChild(al .. "Hitbox")
+        return (h and h:IsA("BasePart")) and h or nil
+    end
+    S.yyOver = function(h, x, z)
+        local now = os.clock()
+        if now - cacheT > 0.1 or cacheH ~= h then cache, cacheT, cacheH = {}, now, h end
+        local k = math.floor(x / 2 + 0.5) * 100003 + math.floor(z / 2 + 0.5)
+        local v = cache[k]
+        if v == nil then
+            params.FilterDescendantsInstances = { h }
+            v = workspace:Raycast(Vector3.new(x, h.Position.Y + 200, z), Vector3.new(0, -400, 0), params) ~= nil
+            cache[k] = v
+            S.exactRays = (S.exactRays or 0) + 1
+        end
+        return v
+    end
+    -- over our half with m studs to spare on every side
+    S.yyOk = function(h, p, m)
+        if not S.yyOver(h, p.X, p.Z) then return false end
+        if m and m > 0 then
+            return S.yyOver(h, p.X + m, p.Z) and S.yyOver(h, p.X - m, p.Z) and S.yyOver(h, p.X, p.Z + m) and S.yyOver(h, p.X, p.Z - m)
+        end
+        return true
+    end
+end
 local function crowded(p)
+    do -- dq_192: yin-yang floor - a spot over the other half is no spot
+        local h = S.yy()
+        if h and not S.yyOk(h, p, 8) then return true end
+    end
+    do -- dq_190: inside the reach of a keep-off boss
+        local k = S.keepOff
+        if k and k.r.Parent and (flat(k.r.Position) - flat(p)).Magnitude < k.d - 4 then return true end
+    end
     if not S.noStandLoaded then
         local ds = workspace:FindFirstChild("DungeonSettings")
         local sn = ds and ds:FindFirstChild("SessionName")
@@ -1488,7 +1594,38 @@ local function crowded(p)
     end
     return false
 end
-local function okSpot(p) return not dangerAt(p) and hasFloor(p) and not crowded(p) end
+-- dq_187: solo the floor may be up to 130 under the spot (was 80). Lifted beside the BigSword lane we are ~95 over the
+-- arena floor: every sideways spot failed the 80-stud floor check = "no clear spot with floor", we could not leave a lit
+-- pizza slice and both first No Hit attempts died there (11-24 15:48, 15:56).
+local function okSpot(p) return not dangerAt(p) and hasFloor(p, (#Players:GetPlayers() <= 1) and 130 or 80) and not crowded(p) end
+-- dq_189 Formless pizza: a clear place = the middle of a dark slice. Walk a circle of radius R round the pizza centre
+-- in 4 degree steps from angle a0 and take the middle of the nearest arc of 3+ clear samples (okSpot = no lit slice,
+-- no other zone, floor below).
+S.pizzaSpot = function(c, a0, R, y)
+    local clear = {}
+    for k = 0, 89 do
+        local a = a0 + k * math.rad(4)
+        local q = Vector3.new(c.X + math.cos(a) * R, y, c.Z + math.sin(a) * R)
+        clear[k] = okSpot(q) and q or false
+    end
+    local best, bd
+    local k = 0
+    while k <= 89 do
+        if clear[k] then
+            local j = k
+            while j + 1 <= 89 and clear[j + 1] do j = j + 1 end
+            if j - k + 1 >= 3 then
+                local mid = math.floor((k + j) / 2)
+                local d = math.min(mid, 90 - mid)
+                if not bd or d < bd then best, bd = clear[mid], d end
+            end
+            k = j + 1
+        else
+            k = k + 1
+        end
+    end
+    return best
+end
 -- 11-22 lvl 220 Master Ryuken: KickLanding circles are up to 323 wide (no way out sideways within 45 studs) but only
 -- reach ~53 over their centre. Go straight up over the zone's top instead: at most 45 studs up, floor still below.
 local function zoneTop(p)
@@ -1497,7 +1634,8 @@ local function zoneTop(p)
     -- dq_176 Formless BigSword: the Sword mesh (35x98x4) that sweeps the lane stands 32 studs over the lane box. Every
     -- hit (6 recorded) came 21 studs over that box, at any side distance up to 39 outside the lane: sideways is no way
     -- out, over the blade is - and that is only ~20 studs above where we hover.
-    -- (dq_180: the BigSword column has no top - going over it is not a way out, see inZone)
+    -- dq_185: beside the BigSword's middle line a spot 40+ over the lane box is clear (see inZone); on the line nothing is
+    if p.Parent and p.Parent.Name == "BigSword" then top = top + 40 end
     return top
 end
 local function liftOver(pos, test)
@@ -1559,11 +1697,22 @@ S.hoverFor = function(m)
     end
     return h
 end
+-- dq_190 Boss Rush (top tier, 11-24): every boss hit there takes the whole hp bar and a run has 3 lives. Addonis
+-- kills everything within ~60 studs of it every 22.5 s, 0.35 s after its floor disc (Indicator 2x120x116) shows -
+-- also 64 studs up (3 deaths in 3 tries, hovering over it). Such bosses are fought from outside that reach with Q / E.
+-- S.bossKeep[name] = studs to keep from the boss (flat); only bosses whose reach was measured.
+S.bossKeep = { Addonis = 67 }
+S.soFor = function(name)
+    local so = tonumber(cfg.standOff) or 0
+    local k = name and cfg.mode == "Boss Rush" and S.bossKeep[name]
+    if k and k > so then so = k end
+    return so
+end
 local function sideSpot(from)
     if curTarget and curTarget.Parent then
         local tp = curTarget.Position
         local best, bestD
-        local so = tonumber(cfg.standOff) or 0
+        local so = S.soFor(curTarget.Parent.Name)
         for _, rad in ipairs(so > 0 and { so, so + 6, math.max(5, so - 6) } or { 5, 8, 11 }) do
             for k = 0, 15 do
                 local a = k * math.pi / 8
@@ -1627,6 +1776,21 @@ local function safeSpot(from, zone)
     local baseY = from.Y
     if curTarget and curTarget.Parent and cfg.move ~= "Walk" then
         baseY = math.max(from.Y, curTarget.Position.Y + S.hoverFor(curTarget.Parent))
+    end
+    -- dq_186 (first No Hit attempt, 11-24 15:48: "no clear spot" twice during the pizza, we stayed in a lit slice and
+    -- it went off). The fallback ring below samples 12 directions around us and can miss the dark slices' strips
+    -- (12 studs wide at 60 from the centre). For a pizza slice look along circles around the pizza centre instead:
+    -- every 5 degrees, at 70+ / 100 / 135 studs out, and take the middle of the nearest clear arc (3+ samples wide).
+    if zone and zone.Parent and zone.Parent.Parent and zone.Parent.Parent.Name == "Slices" and S.pizzaCentreOf then
+        local c = S.pizzaCentreOf(zone.Parent.Parent)
+        if c then
+            local v = Vector3.new(from.X - c.X, 0, from.Z - c.Z)
+            local a0 = math.atan2(v.Z, v.X)
+            for _, R in ipairs({ math.clamp(v.Magnitude, 100, 380), 130, 160 }) do
+                local q = S.pizzaSpot(c, a0, R, baseY)
+                if q then return q end
+            end
+        end
     end
     local base = Vector3.new(from.X, baseY, from.Z)
     -- dq_170: this ring took the first clear spot (always tried +X first), so a fight full of zones walked us away from
@@ -2593,6 +2757,44 @@ local function outside(root, radius)
     return nil
 end
 
+-- dq_192: where to fight on the yin-yang floor. On the wrong half: the nearest spot of ours (get out first). On our
+-- half: the spot nearest the boss that a straight line reaches without leaving our half; it is kept while it holds.
+S.yySpot = function(h, e, me, y)
+    local now = os.clock()
+    local function at(x, z, yy) return Vector3.new(x, yy, z) end
+    local c = S.yyCur
+    if c and S.yyOk(h, c, 9) and not hotAt(c) then return c end
+    if S.yyLast and now - S.yyLast.t < 0.15 then return S.yyLast.p end
+    local best, fallback
+    local onOurs = S.yyOk(h, me, 0)
+    local function pathOk(p)
+        for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
+            if not S.yyOver(h, me.X + (p.X - me.X) * t, me.Z + (p.Z - me.Z) * t) then return false end
+        end
+        return true
+    end
+    local centre = onOurs and e.r.Position or me
+    for _, yy in ipairs({ y, y + 25 }) do
+        for _, rad in ipairs(onOurs and { 6, 16, 28, 42, 58, 76, 96, 118 } or { 10, 20, 32, 46, 62, 80, 100 }) do
+            for k = 0, 11 do
+                local a = k * math.pi / 6 + rad * 0.07
+                local p = at(centre.X + math.cos(a) * rad, centre.Z + math.sin(a) * rad, yy)
+                if S.yyOk(h, p, 14) and hasFloor(p, 130) and (not onOurs or pathOk(p)) then
+                    if not hotAt(p) then best = p break end
+                    fallback = fallback or p
+                end
+            end
+            if best then break end
+        end
+        if best then break end
+    end
+    -- nothing reachable without crossing: stay where we are while that is still ours
+    if not best and onOurs and S.yyOk(h, me, 6) then best = me end
+    best = best or fallback
+    S.yyCur = best
+    S.yyLast = { t = now, p = best }
+    return best
+end
 local function engage(e)
     local r = hrp()
     if not r then return end
@@ -2614,6 +2816,23 @@ local function engage(e)
         local keep = e.m.Name:lower():find("flower") ~= nil
         local hbx = e.m:FindFirstChild("Hitbox")
         local far = hbx and hbx:IsA("BasePart") and (r.Position.Y - (hbx.Position.Y + hbx.Size.Y / 2)) > 13
+        do -- dq_190
+            local so0 = S.soFor(e.m.Name)
+            if so0 > 0 then far = true end
+            S.keepOff = so0 > (tonumber(cfg.standOff) or 0) and { r = e.r, d = so0 } or nil
+        end
+        -- dq_191 Boss Rush, Electro Elemental (11-24 17:56): at half hp it is immune until its Powered Statue of
+        -- Fidelity (1800T) dies. The statue takes ~75T per Q / E and our swings miss it (the game pushes us off its
+        -- spot), so 2.5 s without a drop is normal there - we called it immune 5 times and went back to the boss
+        -- for 20 s each time (132 s for the statue instead of ~70). When every other mob is flagged immune there
+        -- is nothing better to hit: wait a full Q / E round (7 s) before giving up on this one.
+        do
+            local lone = true
+            for _, x in ipairs(enemies()) do
+                if x.m ~= e.m and not (S.decoy[x.m] and (now < S.decoy[x.m] or (S.decoyHp and S.decoyHp[x.m] and x.h.Health >= S.decoyHp[x.m] - x.h.MaxHealth * 0.002))) then lone = false break end
+            end
+            if lone then far = true end
+        end
         if S.dTarget ~= e.m then S.dTarget, S.dT0, S.dHp = e.m, now, e.h.Health
         elseif keep then S.dT0, S.dHp = now, e.h.Health
         elseif swingOn and now - S.dT0 > (far and 7 or 2.5) then -- 11-21 owner: 6 s was slow to leave an immune boss
@@ -2652,19 +2871,87 @@ local function engage(e)
     -- a boss: fight from the spot around it that gets hit least (red zone on us is still handled by dodgeCheck)
     if e.h.MaxHealth >= 8000 and cfg.move ~= "Walk" then
         curTarget = e.r
+        do -- dq_192: yin-yang floor up - fight from our own half only
+            local h = S.yy()
+            if h then
+                if S.yyArena ~= h.Parent then
+                    S.yyArena = h.Parent
+                    S.yyCur = nil
+                    log("YIN-YANG floor up: we are " .. tostring(LP:GetAttribute("Alignment")) .. " - staying over the " .. h.Name)
+                end
+                if not S.yyOk(h, r.Position, 0) and os.clock() - (S.yyWarn or 0) > 2 then
+                    S.yyWarn = os.clock()
+                    log("YIN-YANG over the wrong half at " .. v3s(r.Position) .. " - moving out")
+                end
+                local q = S.yySpot(h, e, r.Position, e.r.Position.Y + heightFor(e.m.Name, e.m))
+                if q then
+                    if (r.Position - q).Magnitude > 3 then moveTo(q, e.r.Position) end
+                    hold = { cf = CFrame.lookAt(q, e.r.Position), t = os.clock() }
+                    swingOn = (q - e.r.Position).Magnitude < 40
+                    S.bossCell = nil
+                    S.target = "yin-yang: on our half"
+                    return
+                end
+            end
+        end
+        -- dq_189: No Hit attempts 16:11-16:45 all died in the pizza: the dodge took us out to a dark slice, engage flew
+        -- us 200 studs back to a boss cell near the pizza centre (lit / about to be lit), and so on until a wave caught us.
+        -- While the pizza is up we wait in a dark slice at the boss's distance from the centre (at least 100), as near to
+        -- the boss as a clear arc allows; Q / E still fire when it is in reach. Boss outside the pizza = fight as usual.
+        do
+            local pz = workspace:FindFirstChild("EmberwingPizza")
+            local sl = pz and pz:FindFirstChild("Slices")
+            local pc = sl and S.pizzaCentreOf and S.pizzaCentreOf(sl)
+            if pc then
+                local toBoss = Vector3.new(e.r.Position.X - pc.X, 0, e.r.Position.Z - pc.Z)
+                if toBoss.Magnitude < 450 then
+                    local mine = Vector3.new(r.Position.X - pc.X, 0, r.Position.Z - pc.Z)
+                    local y = e.r.Position.Y + heightFor(e.m.Name, e.m)
+                    if not (mine.Magnitude >= 95 and okSpot(r.Position)) then
+                        local R = math.clamp(toBoss.Magnitude, 100, 380)
+                        local a0 = (toBoss.Magnitude > 25) and math.atan2(toBoss.Z, toBoss.X) or math.atan2(mine.Z, mine.X)
+                        if mine.Magnitude >= 95 then a0 = math.atan2(mine.Z, mine.X) R = math.clamp(mine.Magnitude, 100, 380) end
+                        local q = S.pizzaSpot(pc, a0, R, y) or S.pizzaSpot(pc, a0, R + 30, y)
+                        if q and (r.Position - q).Magnitude > 3 then moveTo(q, e.r.Position) end
+                    end
+                    local r2 = hrp()
+                    if r2 and (Vector3.new(e.r.Position.X, 0, e.r.Position.Z) - Vector3.new(r2.Position.X, 0, r2.Position.Z)).Magnitude > 1 then hold = { cf = CFrame.lookAt(r2.Position, Vector3.new(e.r.Position.X, r2.Position.Y, e.r.Position.Z)), t = os.clock() } end
+                    swingOn = r2 ~= nil and (r2.Position - e.r.Position).Magnitude < 40
+                    S.target = "pizza: waiting in a dark slice"
+                    return
+                end
+            end
+        end
         local p = bossSpot(e)
         if not p then p = S.edgeSpot(e.r.Position + Vector3.new(0, heightFor(e.m.Name, e.m), 0)) end -- dq_169
         -- owner 11-23 lvl 260: "our skills are wide - just cast them": stand outside the mobs' reach (standOff studs) and
         -- let Q/E/R do the damage. 0 = off (old spot in swing reach).
-        local so = tonumber(cfg.standOff) or 0
+        local so = S.soFor(e.m.Name)
+        local keep = so > (tonumber(cfg.standOff) or 0)
+        if keep and not p then p = e.r.Position end -- every boss cell red: the keep-off circle is still ours
         if p and so > 0 then
-            local dv = flat(p) - flat(e.r.Position)
+            -- keep-off boss: come from where we are (not through the boss), low so Q / E still reach it
+            local dv = keep and (flat(r.Position) - flat(e.r.Position)) or (flat(p) - flat(e.r.Position))
             if dv.Magnitude < 0.1 then dv = flat(r.Position) - flat(e.r.Position) end
             if dv.Magnitude < 0.1 then dv = Vector3.new(0, 0, 1) end
-            local q = e.r.Position + dv.Unit * so + Vector3.new(0, heightFor(e.m.Name, e.m), 0)
-            if not hotAt(q) then p = q end
+            local hgt = heightFor(e.m.Name, e.m)
+            if keep then hgt = math.min(hgt, 12) end
+            local q = e.r.Position + dv.Unit * so + Vector3.new(0, hgt, 0)
+            if keep then
+                if hotAt(q) or not hasFloor(q, 130) then
+                    local a0 = math.atan2(dv.Z, dv.X)
+                    for i = 1, 11 do
+                        local a = a0 + math.ceil(i / 2) * (i % 2 == 0 and -1 or 1) * math.pi / 6
+                        local c = e.r.Position + Vector3.new(math.cos(a) * so, hgt, math.sin(a) * so)
+                        if not hotAt(c) and hasFloor(c, 130) then q = c break end
+                    end
+                end
+                p = q
+                S.bossCell = nil
+            elseif not hotAt(q) then p = q end
         end
         if p then
+            if DEV and (r.Position - p).Magnitude > 200 then log(string.format("TRAVEL %.0f studs to %s (%s)", (r.Position - p).Magnitude, v3s(p), e.m.Name)) end
             if (r.Position - p).Magnitude > 3 then moveTo(p, e.r.Position) end
             hold = { cf = CFrame.lookAt(p, e.r.Position), t = os.clock() }
             swingOn = (p - e.r.Position).Magnitude < 40 + so
@@ -2705,7 +2992,7 @@ local function engage(e)
         stand = tp + dir.Unit * 2 + Vector3.new(0, hover, 0)
         local sec = mySector()
         if sec then stand = tp + sec * 4 + Vector3.new(0, hover, 0) end
-        local so = tonumber(cfg.standOff) or 0
+        local so = S.soFor(e.m.Name)
         if so > 0 then stand = tp + dir.Unit * so + Vector3.new(0, hover, 0) end
         -- another player (bot) already over this mob: take the other side, further out
         if crowded(stand) then
@@ -2756,7 +3043,7 @@ local function engage(e)
         setCF(faceCF(r.Position, tp))
     end
     local d = r and (flat(r.Position) - flat(tp)).Magnitude or 99
-    local so2 = tonumber(cfg.standOff) or 0
+    local so2 = S.soFor(e.m.Name)
     swingOn = d < 14 + so2
     if hover > 0 and so2 <= 0 then heightTick(e) end
     if swingOn and cfg.autoQE then
@@ -2794,7 +3081,7 @@ go("autocast", function()
             local r, h = hrp(), hum()
             local list = enemies()
             if r and h and h.Health > 0 and cfg.autoQE then
-                local near = curTarget and curTarget.Parent and (curTarget.Position - r.Position).Magnitude < 62
+                local near = curTarget and curTarget.Parent and (curTarget.Position - r.Position).Magnitude < math.max(62, S.soFor(curTarget.Parent.Name) + 14)
                 if not near then
                     for _, e in ipairs(list) do if (e.r.Position - r.Position).Magnitude < 55 then near = true break end end
                 end
@@ -2923,6 +3210,15 @@ local function watchDeath()
             -- owner 11-21: don't jump to the lobby after a death (party runs go on, the friends are still fighting).
             -- After a respawn we fight again; the 3rd death in one run = stay out of the fight until the run ends
             -- (a respawn run once died 14 times in a row by flying straight back to the boss).
+            if S.dumpFlight then pcall(S.dumpFlight, "DIED") end -- dq_184 dev
+            pcall(function() -- dq_190
+                local me, t = hrp(), curTarget
+                if cfg.mode ~= "Boss Rush" or not (me and t and t.Parent) then return end
+                -- (dq_191: the "keep off any boss we died near" rule is out - its first use was Pan Ku, whose
+                -- yin-yang floor kills at any distance; only bosses with a measured reach are in S.bossKeep)
+                local name, d = t.Parent.Name, (flat(me.Position) - flat(t.Position)).Magnitude
+                log(string.format("BOSS RUSH death at %s: %.0f studs from it (flat), %.0f over its root%s", name, d, me.Position.Y - t.Position.Y, S.bossKeep[name] and (", keep-off " .. S.bossKeep[name]) or ""))
+            end)
             log(string.format("DIED (%d this run, streak %d)%s", S.runDeaths, cfg.deathStreak,
                 ""))
             -- 11-23 Neon Calamity: Mue no Ikari one-shot us every 12 s. Auto best, solo: 6 deaths = this dungeon is too hard,
@@ -3074,6 +3370,7 @@ local function dungeonTick()
         elseif p then
             S.phase = "move"
             S.target = string.format("waypoint %d/%d", i, n)
+            if DEV and hrp() and (hrp().Position - p).Magnitude > 100 then log(string.format("TRAVEL %.0f studs to route waypoint %d/%d at %s", (hrp().Position - p).Magnitude, i, n, v3s(p))) end
             moveTo(p)
         else
             S.phase = "wait"
@@ -3675,9 +3972,11 @@ local function lobbyTick()
     -- dq_163: raids / tower / boss rush are not in MAP_REQ (Elemental Raids Fourteen sent 1 and was refused 4 times, 11-24);
     -- the game button reads DungeonInfo.dungeonInfo[Map].DifficultyReqs[Difficulty] for every mode - same here
     pcall(function() local r = require(RS.Modules.DungeonInfo).dungeonInfo[map].DifficultyReqs[diff] if tonumber(r) then need = tonumber(r) end end)
-    local t = { Map = map, Calamity = false, Hardcore = hc, NoHit = false,
+    -- dq_185 owner 11-24: "one hit = lost" = the game's No Hit mode (the NoHit switch on the dungeon screen, solo only).
+    -- "set noHit true" sends it with PlaySolo.
+    local t = { Map = map, Calamity = false, Hardcore = hc, NoHit = cfg.noHit == true,
         Difficulty = diff, LevelRequirement = need, Tier = 1, Private = false, Easter = false }
-    log("PlaySolo " .. map .. " " .. diff .. (hc and " hardcore" or "") .. " (try " .. S.tries[key] .. ")")
+    log("PlaySolo " .. map .. " " .. diff .. (hc and " hardcore" or "") .. (cfg.noHit == true and " NO HIT" or "") .. " (try " .. S.tries[key] .. ")")
     -- why does the server sometimes not start it? note our state + listen for any answer (once per lobby)
     pcall(function()
         local a = {}

@@ -2,7 +2,7 @@
 -- lobby place 11872917490, dungeon place 14928194914
 -- Load:  loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/dqhub/main/dq.lua"))()
 -- Owner (local build):  loadstring(readfile("dq/dq.lua"))()
-local VERSION = "dq_139"
+local VERSION = "dq_183"
 local G = (getgenv and getgenv()) or _G
 if G.__dq_stop then pcall(G.__dq_stop) end
 -- one copy only: every load takes a new number and older copies stop themselves
@@ -78,7 +78,7 @@ local DEFAULT = {
     move = "Teleport", tpStep = 60, tpWait = 0.12, tweenSpeed = 60, swingRate = 10, standDist = 4, hover = 10,
     autoQE = true, bossFirst = true, endAction = "Retry", stuckTimeout = 480, lobbyWait = 8,
     totalRuns = 0, bestRun = 0, totalSeconds = 0,
-    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, impTry = "Lunar", impBox = false, exploreHits = {}, keyFail = {}, keyBlock = {}, pendingRun = "", rejoins = {}, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
+    autoBest = true, retry = true, dodge = false, dodgeLight = true, dodgeOn = "auto", dodgeMode = "auto", autoPortal = true, standOff = 0, exactZones = true, carrySpots = {}, impTry = "Lunar", impBox = false, exploreHits = {}, keyFail = {}, keyBlock = {}, pendingRun = "", rejoins = {}, -- auto = work out from dodge/dodgeLight once (dq_106) -- owner 11-21: farming without dodge is faster even with deaths
     sellRarity = { common = true, uncommon = true, rare = true }, sellTypes = { weapons = true, armors = true, helmets = true, legs = true },
     badRoute = {}, deathStreak = 0, lastPlayed = "", lastPlayedAt = 0, autoJoin = false, dangerAnims = {}, bossCells = {}, mobHeight = {}, zoneDmg = {}, watchdog = true, stuckMin = 3, wd = {}, autoFree = true, gameRetry = false, lowGfx = false, autoUpgrade = false, upgSlots = { weapons = true, armors = true, helmets = true, legs = true, rings = true }, upgLevels = 5, timingLog = false, sellAt = 80, mode = "Dungeons", modeTier = {}, recordRoute = false, tuneSet = 0,
     autoSell = false, autoSP = true, spStat = "physical", autoEquipBest = true, autoDaily = true, autoQuests = true,
@@ -687,15 +687,24 @@ local function pickTarget()
         local score = d
         if cfg.bossFirst then score = score - e.h.MaxHealth / 50 end -- big hp pool = boss = first
         -- orbs / gems / totems next to a boss (Sunken Fortress: Barbed Orb Sentry beside Fortress Shaman, 11-21 one-hit death): before the boss
+        -- 11-23 lvl 260: the game carried us to the next room and we flew back to a mob 900 studs behind, again and again
+        -- for a minute (time lost, hits on the way). After a carry, mobs more than 400 studs away wait 20 s.
+        if S.carriedUntil and os.clock() < S.carriedUntil and d > 400 then score = score + 1e9 end
         local nm = e.m.Name:lower()
         if nm:find("orb") or nm:find("sentry") or nm:find("crystal") or nm:find("gem") or nm:find("totem") or nm:find("pylon") or nm:find("statue") or nm:find("powered") or nm:find("pillar") or nm:find("generator") or nm:find("obelisk") or nm:find("tower") then score = score - 2000 end
         -- healers first of all: Fortress Shaman carries a "heal" Beam (dq mobs scan 11-21) and keeps the others alive
         if e.m:FindFirstChild("heal") or nm:find("shaman") or nm:find("cleric") or nm:find("healer") then score = score - 3000 end
         -- the game marks real bosses with attribute Boss = true (seen on Blightwyrm): those first among big mobs
         if e.m:GetAttribute("Boss") == true then score = score - 1500 end
+        -- dq_166: two bosses with the same hp (Lifeless + Soulless): take the tall one first - we can swing it from over
+        -- every attack box of that room (S.hoverFor 29), the other only gets Q / E while zones are up
+        if S.hoverFor and S.hoverFor(e.m) >= 28 then score = score - 200 end
+        -- dq_162 owner 11-24 lvl 275 Calamity: Lifeless Flower (2.25B) sits by Lifeless + Soulless, they swap immunity and heal back
+        -- while it lives; the hp/50 boss bonus (3e14 there) buried the -2000 bonuses, so the flower never got hit. Flower first, always.
+        if nm:find("flower") or nm:find("lotus") or nm:find("bloom") then score = score - 1e16 end
         -- a mob whose hp did not move while we hit it (decoy / immune phase, owner 11-21: lvl 80 boss copies): skip it a while
         -- 11-21 lvl 80 Electro Elemental: immune at 50% until Powered Statue (8.26M) dies; +100000 lost to the -hp/50 boss bonus -> +1e9 = only when nothing else is left
-        if S.decoy and S.decoy[e.m] and (os.clock() < S.decoy[e.m] or (S.decoyHp and S.decoyHp[e.m] and e.h.Health >= S.decoyHp[e.m] - e.h.MaxHealth * 0.002)) then score = score + 1e9 end
+        if S.decoy and S.decoy[e.m] and (os.clock() < S.decoy[e.m] or (S.decoyHp and S.decoyHp[e.m] and e.h.Health >= S.decoyHp[e.m] - e.h.MaxHealth * 0.002)) then score = score + 1e18 end -- dq_162: 1e18 so an immune flower (-1e16) still waits
         -- 11-21 lvl 80: 12 mobs with the same 11M hp -> the pick flipped several times a second and nothing died.
         -- Stick to the current target (worth 60 studs) and among equals finish the most hurt one first.
         if e.m == S.stickTo then score = score - 60 end
@@ -834,6 +843,7 @@ local function setCF(cf)
     end
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = cf
+    S.floatY = cf.Position.Y -- dq_161: keep this height until the next move
     hold = nil -- a real move ends any hover hold (old hold pulled us back to the last mob)
     lastSet = { pos = cf.Position, t = os.clock() }
 end
@@ -853,8 +863,31 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
         -- the same set spot pushed to the same place again = blocked spot (wall / boss body), not a server rollback:
         -- count it once, then stop asking for that spot for 20 s (setCF swaps it for where the game puts us)
         local same = S.lastPb and now - S.lastPb.t < 10 and (S.lastPb.set - lastSet.pos).Magnitude < 4 and (S.lastPb.now - r.Position).Magnitude < 4
-        S.lastPb = { set = lastSet.pos, now = r.Position, t = now }
-        if same then
+        -- 11-23 lvl 260 (S02 kick 22:07): the body was being CARRIED - each "pull" put us further along one line (680 studs
+        -- in 2 s), the next set went back and the carry went on. A server rollback puts us back, not further ahead.
+        -- Same direction as the last pull, within 1 s, and further on = carried: not counted, and we let it finish (1.5 s).
+        local carried = false
+        if S.lastPb and now - S.lastPb.t < 1 then
+            local a = flat(S.lastPb.now) - flat(S.lastPb.set)
+            local b = flat(r.Position) - flat(lastSet.pos)
+            -- dq_178: and this pull is at least 25 studs. Two 13-16 stud pushes the same way when we landed among the
+            -- mobs of room 6 counted as a carry (11-24 12:27): everything paused 1.5 s between 6 mobs -> 2 hits, dead.
+            if a.Magnitude > 1 and b.Magnitude >= 25 and a.Unit:Dot(b.Unit) > 0.8 and (flat(r.Position) - flat(S.lastPb.now)).Magnitude > 3 then carried = true end
+        end
+        local prevPb = S.lastPb
+        S.lastPb = { set = lastSet.pos, now = r.Position, t = now, carried = carried }
+        -- dq_182: first pull of a chain (none in the 4 s before it) = where the game picked us up
+        if not S.pbFirst or not prevPb or now - prevPb.t > 4 then S.pbFirst = { set = lastSet.pos, t = now } end
+        if carried then
+            -- dq_169: remember where this carry picked us up. dq_182: the chain's first pull, not the pull before this one -
+            -- that one was already 400 studs down the carry path (11-24 13:27: keep-out noted mid-path, we flew back into
+            -- the real trigger, were carried a second time and died on the way).
+            if prevPb and not prevPb.carried and S.noteCarry then pcall(S.noteCarry, (S.pbFirst and S.pbFirst.set) or prevPb.set) end
+            S.movingUntil = now + 1.5
+            S.carriedUntil = now + 20
+            hold = nil
+            if now - (S.carryLogT or 0) > 3 then S.carryLogT = now log(string.format("CARRIED to %s - letting the game move us, not counted as a pull-back", v3s(r.Position))) end
+        elseif same then
             S.blockedSpots = S.blockedSpots or {}
             table.insert(S.blockedSpots, { set = lastSet.pos, now = r.Position, untilT = now + 20 })
             log(string.format("BLOCKED SPOT %s (pushed to %s again) - avoided 20 s, not counted", v3s(lastSet.pos), v3s(r.Position)))
@@ -877,6 +910,11 @@ end
 local function moveTo(pos, lookAt, mode)
     mode = mode or cfg.move
     hold = nil
+    -- dq_166: one mover at a time. A dodge that started while the fight loop was still stepping to the boss (or a second
+    -- dodge while the first was in flight) left two loops pulling opposite ways: 120 "pull-backs" in 10 s in the Mindless
+    -- room (11-24 10:06:50), a hair under our own S02 safety kick. The newest move wins, an older one stops.
+    S.moveId = (S.moveId or 0) + 1
+    local myId = S.moveId
     local r = hrp()
     if not r then return end
     lookAt = lookAt or pos
@@ -884,7 +922,7 @@ local function moveTo(pos, lookAt, mode)
         local step = math.max(5, tonumber(cfg.tpStep) or 60)
         for _ = 1, 60 do
             r = hrp()
-            if not r or not F.alive then return end
+            if not r or not F.alive or S.moveId ~= myId then return end
             local d = pos - r.Position
             if d.Magnitude <= step then setCF(faceCF(pos, lookAt)) return end
             setCF(faceCF(r.Position + d.Unit * step, lookAt))
@@ -895,7 +933,7 @@ local function moveTo(pos, lookAt, mode)
         local t0 = os.clock()
         while F.alive and os.clock() - t0 < 30 do
             r = hrp()
-            if not r then return end
+            if not r or S.moveId ~= myId then return end
             local d = pos - r.Position
             local dt = RunService.Heartbeat:Wait()
             local move = speed * dt
@@ -1052,6 +1090,19 @@ F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
     r.AssemblyLinearVelocity = Vector3.zero
     r.CFrame = hold.cf
 end)
+-- dq_161 owner 11-24 "it still drops, make it float all the time": the hold above ends after 0.5 s, then gravity
+-- pulled us down to the floor between moves. Keep the height of our last own move (no sideways snap, small lift only).
+F.conns[#F.conns + 1] = RunService.Heartbeat:Connect(function()
+    if not cfg.farm or IN_LOBBY or not S.floatY or hold then return end
+    if S.movingUntil and os.clock() < S.movingUntil then return end
+    local r = hrp() local h = hum()
+    if not r or not h or h.Health <= 0 then return end
+    local dy = S.floatY - r.Position.Y
+    if dy > 12 or dy < -12 then S.floatY = nil return end -- game moved / respawned us: not ours to undo
+    local v = r.AssemblyLinearVelocity
+    if v.Y < 0 then r.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z) end
+    if dy > 0.3 then r.CFrame = r.CFrame + Vector3.new(0, dy, 0) end
+end)
 
 --------------------------------------------------------------------------------
 -- dodge: mobs build a red Indicator + a Hitbox part before a skill lands (Aftershock, rapidfire, TargetBeam,
@@ -1061,10 +1112,19 @@ local dangers = {} -- part -> born time
 local function isDanger(p)
     if not p:IsA("BasePart") then return false end
     -- (DeadlyWhirl / DeadlyVortex are OUR spells - they appear on us when Q/E is used; not dangers. 11-21 14:03)
-    if p.Name ~= "Hitbox" and p.Name ~= "Indicator" then return false end
+    -- 11-23 lvl 260 pre-hit recordings: Lifeless marks its hit 1.8 s ahead with a plain workspace "Part" column (50x104x56 +
+    -- a 4-thick plate); a pizza attack uses "hitbox1".."hitbox8". Both were never dodged (8 + several hits a run).
+    local nm = p.Name
+    local column = nm == "Part" and p.Parent == workspace and not p.CanCollide and p.Size.Y >= 90 and p.Size.Y <= 130 and math.max(p.Size.X, p.Size.Z) <= 400 and math.min(p.Size.X, p.Size.Z) <= 60 -- dq_164: lvl 275 columns are up to 183 long (130 limit missed them: 9 "in zone: none" hits in one run)
+    if nm ~= "Hitbox" and nm ~= "Indicator" and not column and not nm:match("^[Hh]itbox%d+$") then return false end
     -- 11-23 lvl 250 First Sanctuary: boss Zuriel puts a Safezone model (Hitbox 50 ball + Indicator 386 disc) on the floor,
     -- 5 s later a nuke one-shots everyone outside it (every death on Zuriel). Its parts are the SAFE spot, never a danger.
     if p.Parent and p.Parent.Name:lower():find("safezone") then return false end
+    -- dq_171 lvl 270 Formless PlayerRing: a marker glued to the player (it catches up within 0.05 s of every move) that
+    -- never does damage itself - 24 rings recorded at 20 Hz (dq/ring.txt 11-24), we stood in the middle of each and every
+    -- hit in that time came from another zone (pizza slice, BigSword). Treated as a 20-stud zone it made us hop twice a
+    -- second for the whole fight (60-74 dodges per 30 s): no swings, drifting off the boss, "no clear spot" stalls.
+    if p.Parent and p.Parent.Name == "PlayerRing" then return false end
     -- players' own skills carry OwnerUserId (our Q made 30x30 Hitboxes: 1206 dodges from our own skills on 11-21)
     if p:GetAttribute("OwnerUserId") ~= nil or (p.Parent and p.Parent:GetAttribute("OwnerUserId") ~= nil) then return false end
     local c = char()
@@ -1072,7 +1132,13 @@ local function isDanger(p)
     local en = workspace:FindFirstChild("Enemies")
     if p.Parent and p.Parent:IsA("Model") and p.Parent:FindFirstChildOfClass("Humanoid") then return false end -- a mob's own body hitbox
     -- arena-sized parts are not attacks (11-21 Sunken Fortress: 2 such zones sent us to the spawn every second)
-    if math.max(p.Size.X, p.Size.Y, p.Size.Z) > 700 then
+    -- (lvl 260 Formless ArenaLine 853x73x18: a real line attack, shown ~1.5 s before 500M; dq_154 dodges it again, now with
+    -- the least-bad spot fallback - dq_150 froze with "no clear spot" and lost 4 runs)
+    -- dq_156: only parts big in two directions are arena parts; long thin lines (ArenaLine 853x73x18, EmberwingLingerLine
+    -- 858x34x36 - 4 hits in a row on 11-23) are attacks
+    local sz = { p.Size.X, p.Size.Y, p.Size.Z }
+    table.sort(sz)
+    if sz[3] > 700 and sz[2] > 300 then
         if not S.hugeSeen then S.hugeSeen = {} end
         local id = p:GetFullName()
         if not S.hugeSeen[id] then S.hugeSeen[id] = true log(string.format("ZONE ignored (too big) %s %.0fx%.0fx%.0f", id, p.Size.X, p.Size.Y, p.Size.Z)) end
@@ -1085,7 +1151,13 @@ end
 local recentInd = {} -- {part, t, pos, name}
 local function attackName(p) return (p.Parent and p.Parent ~= workspace) and p.Parent.Name or "plain" end
 F.conns[#F.conns + 1] = workspace.DescendantAdded:Connect(function(p)
-    if not isDanger(p) then return end
+    if not isDanger(p) then
+        -- a plain Part may get its size a moment after it is parented
+        if p.Name == "Part" and p.Parent == workspace then
+            task.delay(0.1, function() pcall(function() if p.Parent and isDanger(p) then dangers[p] = os.clock() end end) end)
+        end
+        return
+    end
     local now = os.clock()
     dangers[p] = now
     pcall(function()
@@ -1117,13 +1189,121 @@ local function liveDangers()
     if now - liveAt < 0.05 then return liveCache end
     local out = {}
     for p, t in pairs(dangers) do
-        if not p.Parent or now - t > 15 then dangers[p] = nil else out[#out + 1] = p end
+        if not p.Parent or now - t > 15 then dangers[p] = nil
+        -- dq_172 Formless BigSword: it strikes once, 2.1-2.2 s after it shows (all 4 recorded hits). Its red lane (Indicator)
+        -- stays for many seconds after that and, with the wide box the sword needs, left "no clear spot" for 9 s in a row
+        -- (we sat still there and the lingering fire line hit twice). The lane alone is not a zone; the sword box ends at 2.8 s.
+        elseif p.Parent.Name == "BigSword" and (p.Name ~= "Hitbox" or now - t > 2.8) then
+        else out[#out + 1] = p end
     end
     liveCache, liveAt = out, now
     return out
 end
+-- 11-23 lvl 260 Formless EmberwingPizza: 16 slices, each a 22.5 degree wedge ~400 long from the arena centre. Their
+-- boxes (152x398 etc) overlap and covered the whole arena: "no clear spot", we stood still and the PlayerRing + BigSword
+-- killed us. A slice is tested as a wedge: centre = middle of all slice boxes, inside = within the slice's angle + reach.
+local inSlice
+do
+local sliceCentre = setmetatable({}, { __mode = "k" })
+local function pizzaCentre(folder)
+    local c = sliceCentre[folder]
+    if c and os.clock() - c.t < 2 then return c.v end
+    local sum, n = Vector3.zero, 0
+    for _, d in ipairs(folder:GetDescendants()) do
+        if d:IsA("BasePart") and d.Name == "Hitbox" then sum, n = sum + d.Position, n + 1 end
+    end
+    local v = n >= 6 and sum / n or nil
+    sliceCentre[folder] = { v = v, t = os.clock() }
+    return v
+end
+inSlice = function(pos, p, margin)
+    local folder = p.Parent and p.Parent.Parent
+    if not folder or folder.Name ~= "Slices" then return nil end
+    -- dq_169: all 16 Hitboxes exist for the whole attack, but a slice only goes off while its own plate (the MeshPart
+    -- the Hitbox sits in) is lit: even and odd slices take turns, each set shows ~4 s before it hits (dq/pizza.txt
+    -- 11-24). Counting all 16 left no clear angle: we fled 400 studs from Formless for the 25-30 s of every pizza -
+    -- the time the lvl 270 run was short of. The boss stays ~40 studs from the centre: wait in a dark slice near it.
+    if p.Parent:IsA("BasePart") and p.Parent.Transparency >= 0.7 then return false end
+    -- dq_175: the angle model below takes "slice direction = box centre - pizza centre". For the 12 slices that do not
+    -- lie on an axis or a diagonal the box centre is 7-10 degrees off the wedge's middle, so we stood on slice edges and
+    -- three second-wave detonations (9.2 s) hit us there. The Hitbox is a precise mesh: ask it directly.
+    if cfg.exactZones ~= false and S.exactIn and p.CanQuery then
+        local ok, res = pcall(S.exactIn, pos, p, math.min(margin, 6), false)
+        if ok then return res end
+    end
+    local c = pizzaCentre(folder)
+    if not c then return nil end
+    local v = Vector3.new(pos.X - c.X, 0, pos.Z - c.Z)
+    local b = Vector3.new(p.Position.X - c.X, 0, p.Position.Z - c.Z)
+    local d, bd = v.Magnitude, b.Magnitude
+    if bd < 20 then return nil end
+    if d < 15 + margin then return true end
+    if d > bd * 2.1 + margin then return false end
+    local cosA = v:Dot(b) / (d * bd)
+    local ang = math.deg(math.acos(math.clamp(cosA, -1, 1)))
+    -- dq_171: pad 4 deg + margin -> 2 deg + 4 studs (with the old pad no dark slice had a clear strip within 70 studs of
+    -- the centre, where Formless stands)
+    return ang <= 11.25 + 4 + math.deg(math.atan(margin / d)) -- dq_174: back to 4 deg + margin (dq_171's small pad: slice edge hit near the centre)
+end
+end
+-- dq_168: the real footprint of mesh / union zones. Their boxes are far bigger than what hits: the Mindless StaticRing
+-- (90x103x90) is a ring 9 thick with an empty middle, its Nuke (421x553x373) a disc ~240 wide, SlamLines a set of lines,
+-- shock waves thin rings (dq/shapes.txt, measured 11-24). With boxes we fled or hovered over them all the time and lost
+-- the swings (Mindless: 0.16 swings a second instead of 1.1). A ray straight down through the one part (Include filter)
+-- tells whether the part really is over / under a point and how high it reaches there.
+do
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
+    local cache, cacheT = setmetatable({}, { __mode = "k" }), os.clock()
+    S.exactRays = 0
+    S.exactIn = function(pos, p, m, tall)
+        local now = os.clock()
+        if now - cacheT > 0.3 then cache, cacheT = setmetatable({}, { __mode = "k" }), now end
+        local pp = p.Position
+        local e = cache[p]
+        if not e or (e.pos - pp).Magnitude > 0.5 then e = { pos = pp, map = {} } cache[p] = e end
+        local k = (math.floor(pos.X / 2 + 0.5) * 100003 + math.floor(pos.Z / 2 + 0.5)) * 4 + (m <= 0 and 0 or (m >= 15 and 2 or 1))
+        local top = e.map[k]
+        if top == nil then
+            local cf, sz = p.CFrame, p.Size
+            local ry = math.abs(cf.RightVector.Y) * sz.X / 2 + math.abs(cf.UpVector.Y) * sz.Y / 2 + math.abs(cf.LookVector.Y) * sz.Z / 2
+            local from, len = pp.Y + ry + 2, 2 * ry + 4
+            params.FilterDescendantsInstances = { p }
+            -- dq_182: devices without dq/dev.flag (friends' phones): at most 300 rays per 0.1 s; over that the zone counts
+            -- as "inside" like the old box test (the lvl 270 pizza asks for up to 14000 rays a second)
+            if not DEV then
+                if now - (S.rayWinT or 0) > 0.1 then S.rayWinT, S.rayWinN = now, 0 end
+                if (S.rayWinN or 0) > 300 then return true end
+            end
+            local function ray(x, z)
+                S.rayWinN = (S.rayWinN or 0) + 1
+                S.exactRays = S.exactRays + 1
+                local res = workspace:Raycast(Vector3.new(x, from, z), Vector3.new(0, -len, 0), params)
+                return res and res.Position.Y or nil
+            end
+            local x, z = pos.X, pos.Z
+            top = ray(x, z)
+            if not top and m > 0 then
+                top = ray(x + m, z) or ray(x - m, z) or ray(x, z + m) or ray(x, z - m)
+                if not top then
+                    local d = m * 0.7
+                    top = ray(x + d, z + d) or ray(x - d, z + d) or ray(x + d, z - d) or ray(x - d, z - d)
+                end
+            end
+            e.map[k] = top or false
+        end
+        if not top then return false end
+        -- dq_177: the ray decides the footprint only; for the height take the top of the part's box. The Mindless
+        -- StaticRing mesh has a low lip (ray top 6 over its centre) next to a 52-tall wall: standing over the lip the
+        -- "top here" said clear and the pulse hit us (3 runs in a row, one hit each, 1.5 s after the ring showed).
+        local cf, sz = p.CFrame, p.Size
+        local boxTop = pp.Y + math.abs(cf.RightVector.Y) * sz.X / 2 + math.abs(cf.UpVector.Y) * sz.Y / 2 + math.abs(cf.LookVector.Y) * sz.Z / 2
+        return pos.Y <= math.max(top, boxTop) + (tall and 60 or m)
+    end
+end
 -- inside the part's box (+ margin); flat red discs (Indicator) count as a tall column
 local function inZone(pos, p, margin)
+    do local w = inSlice(pos, p, margin or 6) if w ~= nil then return w end end
     local lp = p.CFrame:PointToObjectSpace(pos)
     local m = margin or 6
     local hx, hy, hz = p.Size.X / 2 + m, p.Size.Y / 2 + m, p.Size.Z / 2 + m
@@ -1139,33 +1319,167 @@ local function inZone(pos, p, margin)
     if thin <= 2.5 then -- flat rings only; a 5-thick slash box is not a column (it blocked every spot, 11-21 13:43)
         if thin == sx then hx = math.max(hx, 60) elseif thin == sy then hy = math.max(hy, 60) else hz = math.max(hz, 60) end
     end
-    return math.abs(lp.X) <= hx and math.abs(lp.Z) <= hz and math.abs(lp.Y) <= hy
+    -- dq_166 lvl 270 Formless BigSword (Hitbox 47x58x559): it hit us twice 21 studs over the top of that part, 2.2 s
+    -- after it showed (ZONEMISS "out x-11 y21 z-100"). The blade comes down from above: its whole height counts.
+    -- (dq_171: and 9 studs outside the lane's width, ZONEMISS "out x9 y21" - 15 more on each side)
+    -- dq_179 Formless BigSword: what hits is a ball of ~54 studs around the model's Primary (where the sword comes down),
+    -- 2.1-2.2 s after it shows - not the lane. Recorded 11-24 (dq/form.txt + dq/imperium.txt): every hit was within 54
+    -- studs (3D) of the Primary; hovering 53 right over it (dq_176) = on the edge, hit 3 times in 10; 17 swords at 54+: 0.
+    -- Outside 60 (+ margin) = clear; the lane box itself still counts for the floor.
+    -- dq_180: not a ball either (hit again 67 studs over the Primary). 42 swords recorded with dq_176-179: standing
+    -- straight over the Primary (within 6 studs sideways, 53-74 up) = hit 4 times in 15; anywhere else around the boss
+    -- (8-58 studs sideways from it) = 0 in 27. The sword comes down on its Primary, a point ~20 studs behind the boss -
+    -- right where our favourite boss spot is. So: a column of 12 studs (+ margin) around the Primary, at any height.
+    -- dq_183: 58 swords recorded now (dq/form.txt): all 6 hits were with us exactly on the lane's middle line ("lane x 0":
+    -- right behind the boss over the Primary, or right in front of it), at any height (21-74 over the lane box);
+    -- 8 or more studs to the side of that line: 0 hits in 22. The sword cuts along the vertical plane through the lane's
+    -- axis. So: 6 studs (+ margin) to each side of that plane, the whole lane long, at any height.
+    if p.Parent and p.Parent.Name == "BigSword" and math.abs(lp.X) <= 6 + m and math.abs(lp.Z) <= p.Size.Z / 2 + m then return true end
+    -- dq_172 Formless EmberwingLingerLine (Hitbox 858x34x36, Indicator 858x12x36): two 37 % hits 24 studs over the top of
+    -- the Indicator, 11 s after it showed (ZONEMISS 11-24 11:05) - the line keeps burning and reaches higher than its parts
+    if p.Parent and p.Parent.Name == "EmberwingLingerLine" then hy = math.max(hy, 50) end
+    if not (math.abs(lp.X) <= hx and math.abs(lp.Z) <= hz and math.abs(lp.Y) <= hy) then return false end
+    -- dq_168: inside the box - for a mesh / union ask its real shape ("set exactZones false" = boxes as before)
+    if cfg.exactZones ~= false and p.CanQuery and (p:IsA("MeshPart") or p:IsA("UnionOperation")) then
+        local ok, res = pcall(S.exactIn, pos, p, m, thin <= 2.5)
+        if ok then return res end
+    end
+    return true
 end
+-- 11-23 lvl 260: Lifeless / Illusive Swordsman hit us with "in zone: none" - travelling boxes (Bladewave, slashes)
+-- reached us after the check. Each box's speed is measured; a moving one is also tested 0.3 and 0.6 s ahead.
+local zoneVel = {}
+go("zonevel", function()
+    local zoneLast = {}
+    while F.alive do
+        task.wait(0.1)
+        local now = os.clock()
+        for p in pairs(zoneLast) do if not dangers[p] then zoneLast[p], zoneVel[p] = nil, nil end end
+        for p in pairs(dangers) do
+            if p.Parent then
+                local l = zoneLast[p]
+                local pos = p.Position
+                if l and now > l.t then
+                    local v = (pos - l.pos) / (now - l.t)
+                    zoneVel[p] = (v.Magnitude > 8 and v.Magnitude < 400) and v or nil
+                end
+                zoneLast[p] = { pos = pos, t = now }
+            end
+        end
+    end
+end)
 local function dangerAt(pos)
-    for _, p in ipairs(liveDangers()) do if inZone(pos, p) then return p end end
+    for _, p in ipairs(liveDangers()) do
+        -- lvl 260 PlayerRing follows us and hit at 2 s old from 12 studs off: keep 20 studs from it
+        -- dq_175: Mindless StaticRing hit us 7 studs outside its box (52 from its centre, ring mesh ends at 45): 16 around it
+        -- dq_181: the Illusive chase boxes (plain workspace Hitbox 50x30x30) hit 8 studs outside their part (74 % of our
+        -- hp, 11-24 13:03, ZONEMISS "out x-3 y8 z-13 age 1.2s"): 12 around them instead of 6
+        local mg = nil
+        if p.Parent and p.Parent.Name == "StaticRing" then mg = 16 elseif p.Parent == workspace and p.Name == "Hitbox" then mg = 12 end
+        if inZone(pos, p, mg) then return p end
+        local v = zoneVel[p]
+        if v and (inZone(pos - v * 0.3, p) or inZone(pos - v * 0.6, p)) then return p end
+    end
     return nil
 end
 
 -- 11-21: dodging to a spot over a cliff dropped us off the map. A spot needs solid floor within 80 studs below.
 local floorParams = RaycastParams.new()
 floorParams.FilterType = Enum.RaycastFilterType.Exclude
-local function hasFloor(p)
+local function hasFloor(p, depth)
     local ex = { workspace:FindFirstChild("Enemies"), workspace:FindFirstChild("Waste") }
     for _, pl in ipairs(Players:GetPlayers()) do if pl.Character then ex[#ex + 1] = pl.Character end end
     floorParams.FilterDescendantsInstances = ex
-    local hit = workspace:Raycast(p + Vector3.new(0, 2, 0), Vector3.new(0, -80, 0), floorParams)
+    local dep = depth or 80 -- dq_179: liftOver asks for 115 (over the BigSword ball we are ~90 over the arena floor)
+    local hit = workspace:Raycast(p + Vector3.new(0, 2, 0), Vector3.new(0, -dep, 0), floorParams)
     for _ = 1, 10 do
         if not hit then return false end
         if hit.Instance.CanCollide or hit.Instance:IsA("Terrain") then return true end
         -- see-through effect parts (zones, beams): look below them
-        hit = workspace:Raycast(hit.Position - Vector3.new(0, 0.1, 0), Vector3.new(0, -80, 0), floorParams)
+        hit = workspace:Raycast(hit.Position - Vector3.new(0, 0.1, 0), Vector3.new(0, -dep, 0), floorParams)
+    end
+    return false
+end
+-- dq_179: can we still fight the mob from spot q? Q / E reach 62 studs from its root; a tall boss (Formless: Hitbox top
+-- 58 over its root) is also in reach from just over its Hitbox, even when that is further than 62 from the root.
+S.reachOK = function(q, root)
+    if (q - root.Position).Magnitude < 62 then return true end
+    local hb = root.Parent and root.Parent:FindFirstChild("Hitbox")
+    if hb and hb:IsA("BasePart") then
+        local top = hb.Position.Y + hb.Size.Y / 2
+        return q.Y - top < 16 and (Vector3.new(q.X, 0, q.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude < 35
     end
     return false
 end
 -- 11-21: two bots in one dungeon = one of them kicked #101 within ~30 s, every time (one bot + a hand player: never).
 -- Both bots CFrame-held onto the same spot over the same mob: the characters push each other apart (fling).
 -- Never stand within 8 studs of another player.
+-- dq_169 lvl 270 room 9: a trigger near the exit carries the player to the last boss. The mobs stand next to it, so
+-- we were carried away 4 times in one fight and flew back each time (40 s lost and a death on the way, 11-24 10:30).
+-- Where a carry picked us up we do not stand again: 30 studs around it for 90 s; after a second carry from the same
+-- place it stays for good and is kept per map in cfg.carrySpots, so later runs never step in.
+S.noStand = {}
+S.noteCarry = function(pos)
+    for _, z in ipairs(S.noStand) do
+        if (flat(z.pos) - flat(pos)).Magnitude < 40 then
+            z.n = z.n + 1
+            z.untilT = math.huge
+            if z.n == 2 then
+                local ds = workspace:FindFirstChild("DungeonSettings")
+                local sn = ds and ds:FindFirstChild("SessionName")
+                local map = sn and tostring(sn.Value) or tostring(cfg.map)
+                cfg.carrySpots = type(cfg.carrySpots) == "table" and cfg.carrySpots or {}
+                local list = type(cfg.carrySpots[map]) == "table" and cfg.carrySpots[map] or {}
+                if #list < 6 then list[#list + 1] = string.format("%.0f,%.0f,%.0f", z.pos.X, z.pos.Y, z.pos.Z) end
+                cfg.carrySpots[map] = list
+                saveCfg()
+                log("CARRY TRIGGER at " .. v3s(z.pos) .. " picked us up twice - kept for this map, never standing within 30 studs of it")
+            end
+            return
+        end
+    end
+    S.noStand[#S.noStand + 1] = { pos = pos, r = 30, n = 1, untilT = os.clock() + 90 }
+    log("CARRY TRIGGER near " .. v3s(pos) .. " - not standing within 30 studs of it for 90 s")
+end
+-- a spot inside a keep-out zone -> the same spot pushed out to the zone's edge (nil when it is not inside one)
+S.edgeSpot = function(p)
+    local nowT = os.clock()
+    for _, z in ipairs(S.noStand) do
+        if nowT < z.untilT and (flat(z.pos) - flat(p)).Magnitude < z.r and math.abs(z.pos.Y - p.Y) < 60 then
+            local d = flat(p) - flat(z.pos)
+            local me = hrp()
+            if d.Magnitude < 1 and me then d = flat(me.Position) - flat(z.pos) end
+            if d.Magnitude < 1 then d = Vector3.new(1, 0, 0) end
+            return Vector3.new(z.pos.X + d.Unit.X * (z.r + 3), p.Y, z.pos.Z + d.Unit.Z * (z.r + 3))
+        end
+    end
+    return nil
+end
 local function crowded(p)
+    if not S.noStandLoaded then
+        local ds = workspace:FindFirstChild("DungeonSettings")
+        local sn = ds and ds:FindFirstChild("SessionName")
+        if sn and tostring(sn.Value) ~= "" then
+            S.noStandLoaded = true
+            local list = type(cfg.carrySpots) == "table" and cfg.carrySpots[tostring(sn.Value)]
+            for _, str in ipairs(type(list) == "table" and list or {}) do
+                local x, y, z = tostring(str):match("^(-?[%d.]+),(-?[%d.]+),(-?[%d.]+)$")
+                if x then S.noStand[#S.noStand + 1] = { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), r = 30, n = 2, untilT = math.huge } end
+            end
+            -- dq_182: Subliminal Dreamscape room 9 - the trigger that carries the player to the last boss. Picked up at
+            -- -3437,-124,4544 and -3454,-124,4563 (11-24); a second carry with mobs left behind killed us twice.
+            if tostring(sn.Value) == "Subliminal Dreamscape" then
+                S.noStand[#S.noStand + 1] = { pos = Vector3.new(-3446, -130, 4553), r = 45, n = 2, untilT = math.huge }
+            end
+            if #S.noStand > 0 then log("CARRY TRIGGERS known on this map: " .. #S.noStand) end
+        end
+    end
+    do
+        local nowT = os.clock()
+        for _, z in ipairs(S.noStand) do
+            if nowT < z.untilT and (flat(z.pos) - flat(p)).Magnitude < z.r and math.abs(z.pos.Y - p.Y) < 60 then return true end
+        end
+    end
     for _, pl in ipairs(Players:GetPlayers()) do
         if pl ~= LP and pl.Character then
             local o = pl.Character:FindFirstChild("HumanoidRootPart")
@@ -1179,18 +1493,27 @@ local function okSpot(p) return not dangerAt(p) and hasFloor(p) and not crowded(
 -- reach ~53 over their centre. Go straight up over the zone's top instead: at most 45 studs up, floor still below.
 local function zoneTop(p)
     local cf, s = p.CFrame, p.Size
-    return p.Position.Y + math.abs(cf.RightVector.Y) * s.X / 2 + math.abs(cf.UpVector.Y) * s.Y / 2 + math.abs(cf.LookVector.Y) * s.Z / 2
+    local top = p.Position.Y + math.abs(cf.RightVector.Y) * s.X / 2 + math.abs(cf.UpVector.Y) * s.Y / 2 + math.abs(cf.LookVector.Y) * s.Z / 2
+    -- dq_176 Formless BigSword: the Sword mesh (35x98x4) that sweeps the lane stands 32 studs over the lane box. Every
+    -- hit (6 recorded) came 21 studs over that box, at any side distance up to 39 outside the lane: sideways is no way
+    -- out, over the blade is - and that is only ~20 studs above where we hover.
+    -- (dq_180: the BigSword column has no top - going over it is not a way out, see inZone)
+    return top
 end
 local function liftOver(pos, test)
     local q = pos
+    -- dq_182: the high lifts (70 up, floor up to 115 below) are for solo runs; with other players in the dungeon the old
+    -- limits stay (45 up, floor within 80) - party runs were kicked #101 after high hovering, solo runs never
+    local solo = #Players:GetPlayers() <= 1
+    local lim, dep = solo and 70 or 45, solo and 115 or 80
     for _ = 1, 4 do
         local z = test(q)
         if not z then
-            if q == pos or q.Y - pos.Y > 45 or not hasFloor(q) or crowded(q) then return nil end
+            if q == pos or q.Y - pos.Y > lim or not hasFloor(q, dep) or crowded(q) then return nil end
             return q
         end
         q = Vector3.new(q.X, math.max(q.Y, zoneTop(z)) + 7, q.Z)
-        if q.Y - pos.Y > 45 then return nil end
+        if q.Y - pos.Y > lim then return nil end -- dq_164: 45 -> 70 (floor 240, attack tops 295 on lvl 275)
     end
     return nil
 end
@@ -1223,14 +1546,28 @@ end
 -- 1) a clear spot 5-11 studs from the mob we fight (still in swing reach), the one closest to us;
 -- 2) else a clear spot near us; 3) else the map start / high above.
 local curTarget = nil -- mob root part we fight
+-- dq_164: hover height over a mob's root. Learned value (16-24) as before, but a tall boss can be swung from 11 over
+-- the top of its Hitbox part (measured lvl 275: swings land on Lifeless from 12 over its 60-tall Hitbox) - and from
+-- there we sit over every attack box of that room (tops 284-295, we are at 303). Never more than 32 over the root.
+S.hoverFor = function(m)
+    local h = math.max(16, math.min(24, tonumber(m and cfg.mobHeight[m.Name]) or 20))
+    local hb = m and m:FindFirstChild("Hitbox")
+    local rt = m and m:FindFirstChild("HumanoidRootPart")
+    if hb and rt and hb:IsA("BasePart") and rt:IsA("BasePart") then
+        local t = hb.Position.Y + hb.Size.Y / 2 + 11 - rt.Position.Y
+        if t > h and #Players:GetPlayers() <= 1 then h = math.min(t, 32) end -- dq_182: solo only (party keeps the 24 cap, #101 history)
+    end
+    return h
+end
 local function sideSpot(from)
     if curTarget and curTarget.Parent then
         local tp = curTarget.Position
         local best, bestD
-        for _, rad in ipairs({ 5, 8, 11 }) do
+        local so = tonumber(cfg.standOff) or 0
+        for _, rad in ipairs(so > 0 and { so, so + 6, math.max(5, so - 6) } or { 5, 8, 11 }) do
             for k = 0, 15 do
                 local a = k * math.pi / 8
-                local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and math.min(24, tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 20) or 24) or 0 -- stay up: melee swings miss us
+                local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and S.hoverFor(curTarget.Parent) or 24) or 0 -- stay up: melee swings miss us
                 local p = Vector3.new(tp.X + math.cos(a) * rad, tp.Y + hov, tp.Z + math.sin(a) * rad)
                 local dd = (p - from).Magnitude
                 -- 11-22 friend #101 (lvl 185 party): target switched to a mob ~280 studs away and the dodge flew to it
@@ -1249,11 +1586,25 @@ end
 -- 3) only for a big attack (a ring wider than 60 = a wipe) leave the area; a small zone with no clear spot
 --    in reach = stay and keep hitting.
 local function safeSpot(from, zone)
+    -- dq_164 (lvl 275 Lifeless + Soulless room): every attack there is arena-wide (SlamLines 378x373, BigSlash 89x361,
+    -- HoleInWall 395 long, shock rings up to 234) but none reaches more than ~55 over the floor. Sideways there was no
+    -- clear spot: we took the "least bad" one and stayed inside BigSlash for its whole 2.9 s (7 hits a run), or stood
+    -- 140 studs from the flower for 14 s. Over the top there always is a clear spot, and Q / E still reach from there
+    -- (measured: full 578T hit on the flower from 58 studs over it). So: a wide zone -> over its top first.
+    local function liftSpot()
+        local up = liftOver(from, dangerAt)
+        if up and (not (curTarget and curTarget.Parent) or S.reachOK(up, curTarget)) then return up end
+        return nil
+    end
+    if zone and zone.Parent and #Players:GetPlayers() <= 1 and math.max(zone.Size.X, zone.Size.Y, zone.Size.Z) >= 60 then -- (dq_182: lift-first only solo)
+        local up = liftSpot()
+        if up then return up end
+    end
     local s = sideSpot(from)
     if s then return s end
     if curTarget and curTarget.Parent then
         local tp = curTarget.Position
-        local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and math.min(24, tonumber(cfg.mobHeight[curTarget.Parent.Name]) or 20) or 24) or 0
+        local hov = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and ((curTarget and curTarget.Parent) and S.hoverFor(curTarget.Parent) or 24) or 0
         local best, bestD
         for _, rad in ipairs({ 14, 18, 22 }) do
             for k = 0, 15 do
@@ -1271,19 +1622,61 @@ local function safeSpot(from, zone)
     end
     -- no clear spot in reach: get out anyway (11-21 Cursed Marshes: stayed in a 50-wide zone and took -2040)
     -- 11-21 15:54 kick "Abnormal player behaviour #101" came right after a 420-stud instant dodge: stay within 45 studs
-    for _, rad in ipairs({ 8, 14, 22, 32, 45 }) do
+    -- 11-23 lvl 260: this ring used our own height - after a respawn on the floor every dodge stayed on the floor
+    -- (Formless PlayerRing / BigSword / slices all reach the floor). Use the hover height over the target when we fight.
+    local baseY = from.Y
+    if curTarget and curTarget.Parent and cfg.move ~= "Walk" then
+        baseY = math.max(from.Y, curTarget.Position.Y + S.hoverFor(curTarget.Parent))
+    end
+    local base = Vector3.new(from.X, baseY, from.Z)
+    -- dq_170: this ring took the first clear spot (always tried +X first), so a fight full of zones walked us away from
+    -- the boss: lvl 270 Formless, 93-283 studs off for the whole 17-25 s of each pizza = no Q / E, no damage, run lost
+    -- on time. Of the clear spots at one radius take the one nearest the mob we fight.
+    local tgt = (curTarget and curTarget.Parent) and curTarget.Position or nil
+    -- (dq_174: + 60 and 75 - from the middle of the BigSword lane 45 studs did not reach a clear spot: "no clear spot"
+    -- for 2 s on the floor after a TeleportSlash put us there, then the sword. Moves over 40 studs go in steps.)
+    for _, rad in ipairs({ 8, 14, 22, 32, 45, 60, 75 }) do
+        local best, bd
         for k = 0, 11 do
             local a = k * math.pi / 6
-            local p = from + Vector3.new(math.cos(a) * rad, 0, math.sin(a) * rad)
-            if okSpot(p) then return p end
+            local p = base + Vector3.new(math.cos(a) * rad, 0, math.sin(a) * rad)
+            if okSpot(p) then
+                if not tgt then return p end
+                local d = (flat(p) - flat(tgt)).Magnitude
+                if not bd or d < bd then best, bd = p, d end
+            end
         end
+        if best then return best end
+    end
+    -- dq_164: over the top before the "least bad" spot (that one is still inside a zone)
+    do
+        local up = liftSpot()
+        if up then return up end
+    end
+    -- nothing fully clear (lvl 260 Formless: lines + slices + sword at once): standing still is the worst choice - the
+    -- PlayerRing follows us. Take the spot inside the fewest zones, if that is fewer than where we are.
+    do
+        local function count(p)
+            local n = 0
+            for _, z in ipairs(liveDangers()) do if inZone(p, z) then n = n + 1 end end
+            return n
+        end
+        local here = count(from)
+        local best, bn, bd
+        for _, rad in ipairs({ 14, 22, 32, 45 }) do
+            for k = 0, 11 do
+                local a = k * math.pi / 6
+                local p = base + Vector3.new(math.cos(a) * rad, 0, math.sin(a) * rad)
+                if hasFloor(p) and not crowded(p) then
+                    local n = count(p)
+                    if n < here and (not bn or n < bn or (n == bn and rad < bd)) then best, bn, bd = p, n, rad end
+                end
+            end
+        end
+        if best then return best end
     end
     -- 11-23 lvl 220 Neokaze hologram phase: the lift put us 40-50 over the boss for 20 s - no swings, and still hit there.
     -- Lift only to a spot still in reach of the target (same 40 as bossSpot); else stay and keep hitting.
-    do
-        local up = liftOver(from, dangerAt)
-        if up and (not (curTarget and curTarget.Parent) or (up - curTarget.Position).Magnitude < 40) then return up end
-    end
     -- nowhere clear within 110 studs: stay and keep hitting (the old jump to the map start bounced us
     -- 350 studs back and forth every second on 11-21; flying up dropped us into the void)
     return nil
@@ -1295,6 +1688,10 @@ end
 local safeParts = {}
 local function isSafePart(p)
     if not p:IsA("BasePart") then return false end
+    -- 11-23 lvl 260 Formless: SafezoneFloor (whole floor) + SafezonePlayer (sits on us) are NOT safe spots. Going down
+    -- into them and standing still let the following PlayerRing + BigSword kill us ~5 s later, every time (17 deaths).
+    local pn = p.Parent and p.Parent.Name:lower() or ""
+    if pn == "safezonefloor" or pn == "safezoneplayer" then return false end
     if p.Name:lower():find("safezone") then return true end
     -- 11-23 lvl 250: the Zuriel Safezone is a Model holding Hitbox / Indicator / Primary parts
     return p.Parent ~= nil and p.Parent:IsA("Model") and p.Parent.Name:lower():find("safezone") ~= nil and (p.Name == "Indicator" or p.Name == "Hitbox")
@@ -1311,7 +1708,11 @@ local function safeZone()
     local ind, any, bi, ba
     local me = hrp()
     for p in pairs(safeParts) do
-        if not p.Parent then safeParts[p] = nil else
+        if not p.Parent then safeParts[p] = nil
+        -- 11-23 owner: stay up top and only go down when the mechanic needs it. The Zuriel nuke lands ~5 s after its
+        -- Safezone shows: wait in the air for the first 3.2 s, then drop into the circle.
+        elseif p.Parent:IsA("Model") and p.Parent.Name:lower():find("safezone") and os.clock() - (safeParts[p] or 0) < 3.2 then
+        else
             local d = me and (flat(p.Position) - flat(me.Position)).Magnitude or 0
             if not ba or d < ba then any, ba = p, d end
             if p.Name:lower():find("indicator") and (not bi or d < bi) then ind, bi = p, d end
@@ -1321,6 +1722,13 @@ local function safeZone()
     if not p then return nil end
     -- stand on the floor in the middle: the indicator lies on the floor, the hitbox is a tall box around it
     local y = ind and (ind.Position.Y + 3) or (p.Position.Y - p.Size.Y / 2 + 4)
+    -- 11-23 owner (lvl 255 Zuriel): on the floor the floor moves (SwordFall, BigLine, SwordIndicator) kill us while we
+    -- wait. The Zuriel Safezone is a 50 ball (Hitbox) centred on the floor: float 15 up, still well inside the ball.
+    local m = p.Parent
+    if m and m:IsA("Model") and m.Name:lower():find("safezone") then
+        local ball = m:FindFirstChild("Hitbox")
+        if ball and ball:IsA("BasePart") and cfg.safeFloat then y = ball.Position.Y + math.min(15, ball.Size.Y / 2 - 6) end -- 17:30 test: floating 15 up died 7x to Zuriel (floor: 0) - off by default
+    end
     return Vector3.new(p.Position.X, y, p.Position.Z), p
 end
 S.safeGo = 0
@@ -1388,7 +1796,7 @@ do
     -- 11-23 DEV: lvl 250 boss Ephrath one-shots us once a run: Ring -> ImperiumAttack (Solar / Lunar parts, 187x166)
     -- + MiddleCircle + Line -> ~4 s later full hp hit "in zone: none". Record every part of it and where we stand.
     F.conns[#F.conns + 1] = workspace.ChildAdded:Connect(function(o)
-        if not DEV or IN_LOBBY or (o.Name ~= "ImperiumAttack" and o.Name ~= "MiddleCircle") then return end
+        if not DEV or IN_LOBBY or not ({ ImperiumAttack = 1, MiddleCircle = 1, PlayerRing = 1, BigSword = 1, HoleInWall = 1 })[o.Name] or (o.Name ~= "ImperiumAttack" and o.Name ~= "MiddleCircle" and (S.recCount or 0) > 12) then return end
         -- 13:16 record: 4 boxes 187x20x166 around the boss, Solar / Lunar in a checkerboard, a red MiddleCircle Hitbox
         -- in the centre; hovering above the centre = dead at 5.0 s. Try standing on the floor inside one kind of box;
         -- died -> try the other kind next time (cfg.impTry), survived -> keep it.
@@ -1552,7 +1960,7 @@ do
             end
             L[#L + 1] = string.format("  gone after %.1fs", os.clock() - t0)
             pcall(appendfile, DIR .. "/imperium.txt", table.concat(L, "\n") .. "\n\n")
-            log("IMPERIUM recorded " .. o.Name .. " -> dq/imperium.txt")
+            S.recCount = (S.recCount or 0) + 1 log("IMPERIUM recorded " .. o.Name .. " -> dq/imperium.txt")
         end)
     end)
     -- 11-22 DEV: lvl 220 Neon District last boss Mue no Ikari - FloorLava (Hitbox 50x444x528) covers the whole arena,
@@ -1617,6 +2025,8 @@ local function dodgeCheck()
     -- so in a party: at most one dodge a second and only short ones (25 studs); otherwise stay and take the hit.
     -- (dq_90 slowed party dodges to 1/s, 25 studs: the friend was still kicked with only 8 dodges - back to the old rule)
     if os.clock() - lastDodge < 0.25 then return false end
+    -- dq_166: a stepped dodge (or the game carrying us) is still moving us - a second one now would pull against it
+    if S.dodgeFlight and os.clock() < S.dodgeFlight then return true end -- dq_178: own stepped dodge only (was S.movingUntil = also carry pauses)
     -- (dq_92 skipped dodges over the move budget; owner 11-21: dodge as before - only the travel is slowed)
     local zone = dangerAt(r.Position)
     -- Light: let small zones hit us, leave only the big area attacks
@@ -1643,12 +2053,17 @@ local function dodgeCheck()
         if (to - r.Position).Magnitude > 40 then
             -- while this stepped move runs, the hover hold must not drag us back to the old spot
             S.movingUntil = os.clock() + 3
-            task.spawn(function() moveTo(to, look) S.movingUntil = nil end)
+            S.dodgeFlight = os.clock() + 3
+            task.spawn(function() moveTo(to, look) S.movingUntil = nil S.dodgeFlight = nil end)
         else
             setCF(faceCF(to, look)) -- face the mob: the swing loop keeps hitting from the side
         end
         S.dodges = S.dodges + 1
-        if os.clock() - (S.lastDodgeLog or 0) > 3 then S.lastDodgeLog = os.clock() log(string.format("DODGE -> %s (%d live zones, %d dodges)", v3s(to), #liveDangers(), S.dodges)) end
+        local zn = ((zone.Parent and zone.Parent ~= workspace) and (zone.Parent.Name .. ".") or "") .. zone.Name
+        if zone.Parent and zone.Parent.Parent and zone.Parent.Parent.Name == "Slices" then zn = "PizzaSlice" end
+        S.dodgeBy = S.dodgeBy or {}
+        S.dodgeBy[zn] = (S.dodgeBy[zn] or 0) + 1
+        if os.clock() - (S.lastDodgeLog or 0) > 3 then S.lastDodgeLog = os.clock() log(string.format("DODGE -> %s (%s, %d live zones, %d dodges)", v3s(to), zn, #liveDangers(), S.dodges)) end
         return true
     end
     return false
@@ -1708,6 +2123,9 @@ local function zoneThreat(p)
 end
 zoneWorthDodging = function(p)
     if cfg.dodge then return true end
+    -- lvl 260 Formless: the following ring and the big sword hit for 25-50% each - always leave them
+    if p.Name == "Part" and p.Parent == workspace then return true end
+    if p.Parent and (p.Parent.Name == "PlayerRing" or p.Parent.Name == "BigSword" or p.Parent.Name == "ArenaLine" or p.Parent.Name == "EmberwingLingerLine" or p.Parent.Name == "TeleportSlash") then return true end
     -- lingering pools (Heldeir 50x50, 11-21): each tick is small (~6%) but they add up - leave once this zone took 10%
     if S.zoneHits and (S.zoneHits[p] or 0) >= 0.10 then return true end
     local avg = zoneThreat(p)
@@ -1844,17 +2262,163 @@ local function learnHit(dmg, maxHp)
     return " | anims " .. (#names > 0 and table.concat(names, ",") or "none") .. " | died " .. (#died > 0 and table.concat(died, ",") or "none")
 end
 
+-- 11-23 owner: "dodge everything at lvl 260". Most 260 hits come with no zone, or a zone 35-50 ms before the damage.
+-- Pre-hit recorder (owner's PC only): keeps the last 2.5 s of the 4 nearest mobs (position, playing animations) and
+-- every new part within 80 studs; on each hit writes that window to dq/prehit.txt to find the tell of each attack.
+do
+    if DEV and not IN_LOBBY then
+        local frames, parts = {}, {}
+        F.conns[#F.conns + 1] = workspace.DescendantAdded:Connect(function(p)
+            if not p:IsA("BasePart") then return end
+            local r = hrp()
+            if not r then return end
+            local ok, pos = pcall(function() return p.Position end)
+            if not ok or (pos - r.Position).Magnitude > 80 then return end
+            local c = char()
+            if c and p:IsDescendantOf(c) then return end
+            parts[#parts + 1] = { t = os.clock(), s = string.format("%s/%s %.0fx%.0fx%.0f d%.0f dy%.0f", p.Parent and p.Parent.Name or "?", p.Name,
+                p.Size.X, p.Size.Y, p.Size.Z, (pos - r.Position).Magnitude, r.Position.Y - pos.Y) }
+            if #parts > 120 then table.remove(parts, 1) end
+        end)
+        pcall(function()
+            local bnr = R("ByteNetReliable")
+            if not bnr then return end
+            F.conns[#F.conns + 1] = bnr.OnClientEvent:Connect(function(buf, refs)
+                if typeof(buf) ~= "buffer" then return end
+                local r = hrp()
+                if not r then return end
+                local who = {}
+                if type(refs) == "table" then
+                    for _, m in pairs(refs) do
+                        if typeof(m) == "Instance" and m:IsA("Model") then
+                            local root = mobRoot(m)
+                            who[#who + 1] = m.Name .. (root and string.format(" d%.0f", (root.Position - r.Position).Magnitude) or "")
+                        end
+                    end
+                end
+                local hex = {}
+                for i = 0, math.min(buffer.len(buf), 20) - 1 do hex[#hex + 1] = string.format("%02x", buffer.readu8(buf, i)) end
+                parts[#parts + 1] = { t = os.clock(), s = "PKT " .. table.concat(hex) .. " len" .. buffer.len(buf) .. " " .. table.concat(who, ",") }
+                if #parts > 160 then table.remove(parts, 1) end
+            end)
+        end)
+        go("prehit", function()
+            while F.alive do
+                task.wait(0.1)
+                local r = hrp()
+                if r and cfg.farm then
+                    local list = enemies()
+                    table.sort(list, function(a, b) return (a.r.Position - r.Position).Magnitude < (b.r.Position - r.Position).Magnitude end)
+                    local row = {}
+                    for i = 1, math.min(4, #list) do
+                        local e = list[i]
+                        local an = {}
+                        pcall(function()
+                            local a = e.m:FindFirstChildWhichIsA("Animator", true)
+                            local src = a or e.h
+                            for _, tr in ipairs(src:GetPlayingAnimationTracks()) do
+                                local id = tr.Animation and tr.Animation.AnimationId or "?"
+                                an[#an + 1] = (id:match("%d+") or id):sub(-6) .. "@" .. string.format("%.1f", tr.TimePosition)
+                            end
+                        end)
+                        row[#row + 1] = string.format("%s d%.0f dy%.0f [%s]", e.m.Name, (e.r.Position - r.Position).Magnitude, r.Position.Y - e.r.Position.Y, table.concat(an, " "))
+                    end
+                    frames[#frames + 1] = { t = os.clock(), s = table.concat(row, " | ") }
+                    if #frames > 25 then table.remove(frames, 1) end
+                end
+            end
+        end)
+        local function hook()
+            local h = hum()
+            if not h then return end
+            local last = h.Health
+            F.conns[#F.conns + 1] = h.HealthChanged:Connect(function(v)
+                local d = last - v
+                last = v
+                if d < h.MaxHealth * 0.05 or not cfg.farm then return end
+                local now = os.clock()
+                local out = { string.format("%s HIT %.0fM", os.date("%H:%M:%S"), d / 1e6) }
+                local pi = 1
+                for _, f in ipairs(frames) do
+                    while parts[pi] and parts[pi].t <= f.t do
+                        if now - parts[pi].t < 2.5 then out[#out + 1] = string.format("  %+.1f NEW %s", parts[pi].t - now, parts[pi].s) end
+                        pi = pi + 1
+                    end
+                    out[#out + 1] = string.format("  %+.1f %s", f.t - now, f.s)
+                end
+                while parts[pi] do
+                    if now - parts[pi].t < 2.5 then out[#out + 1] = string.format("  %+.1f NEW %s", parts[pi].t - now, parts[pi].s) end
+                    pi = pi + 1
+                end
+                pcall(appendfile, DIR .. "/prehit.txt", table.concat(out, "\n") .. "\n\n")
+            end)
+        end
+        hook()
+        F.conns[#F.conns + 1] = LP.CharacterAdded:Connect(function() task.wait(1) hook() end)
+    end
+end
 do -- log damage taken (with what was going on), learn from it, and back off when low
     local last = nil
+    -- 11-23 lvl 260: Soulless took 2x half our HP with "in zone: none". Note every new workspace object; on a big hit
+    -- with no zone, log what appeared in the 4 s before it (name, age, distance) so the next fix has the cause.
+    local newObjs = {}
+    F.conns[#F.conns + 1] = workspace.ChildAdded:Connect(function(o)
+        if IN_LOBBY or Players:FindFirstChild(o.Name) then return end
+        newObjs[#newObjs + 1] = { o = o, t = os.clock(), n = o.Name }
+        if #newObjs > 40 then table.remove(newObjs, 1) end
+    end)
+    local function hitSources()
+        local r = hrp()
+        local out = {}
+        for i = #newObjs, 1, -1 do
+            local e = newObjs[i]
+            local age = os.clock() - e.t
+            if age < 4 and #out < 8 then
+                local p = e.o.Parent and (e.o:IsA("BasePart") and e.o or e.o:FindFirstChildWhichIsA("BasePart", true))
+                out[#out + 1] = string.format("%s %.1fs%s", e.n, age, (p and r) and string.format(" %.0f studs %.0f up", (p.Position - r.Position).Magnitude, r.Position.Y - p.Position.Y) or "")
+            end
+        end
+        return #out > 0 and table.concat(out, ", ") or "nothing new"
+    end
+    -- dq_165: a hit with no zone - list every live zone we were near and how far outside it we were on each of its
+    -- own axes (negative = inside on that axis), so zones whose real hit volume is bigger than their part show up
+    local function nearZones()
+        local r = hrp()
+        if not r then return "-" end
+        local out = {}
+        for _, p in ipairs(liveDangers()) do
+            local lp = p.CFrame:PointToObjectSpace(r.Position)
+            local ox, oy, oz = math.abs(lp.X) - p.Size.X / 2, math.abs(lp.Y) - p.Size.Y / 2, math.abs(lp.Z) - p.Size.Z / 2
+            if math.max(ox, oy, oz) < 45 and #out < 6 then
+                out[#out + 1] = string.format("%s%s(%.0fx%.0fx%.0f %s) out x%.0f y%.0f z%.0f age %.1fs%s", (p.Parent and p.Parent ~= workspace) and (p.Parent.Name .. ".") or "", p.Name,
+                    p.Size.X, p.Size.Y, p.Size.Z, p.ClassName:sub(1, 5), ox, oy, oz, os.clock() - (dangers[p] or os.clock()),
+                    (ox < 0 and oy < 0 and oz < 0) and " INBOX-BUT-SHAPE-SAID-CLEAR" or "")
+            end
+        end
+        return #out > 0 and table.concat(out, " | ") or "no zone within 45"
+    end
     local function hook()
         local h = hum()
         if not h then return end
         last = h.Health
+        local lastMax = h.MaxHealth
         F.conns[#F.conns + 1] = h.HealthChanged:Connect(function(v)
+            -- dq_166: max hp went down (equip best swapped a piece at the end of the run) - hp follows it, that is no hit
+            local mx = h.MaxHealth
+            if mx < lastMax - 1 then lastMax = mx last = v return end
+            lastMax = mx
+            -- dq_173: after the run is cleared equip best swaps gear and hp drops by that piece's health (-905.5M every
+            -- run, logged as a hit with no mob alive) - max hp changes a moment later, so the check above missed it
+            if S.runCleared and last and v < last - 1 then last = v return end
             if last and v < last - 1 and cfg.farm then
                 local extra = ""
                 pcall(function() extra = learnHit(last - v, h.MaxHealth) end)
-                log(string.format("HIT -%.0f hp %.0f/%.0f | %s%s", last - v, v, h.MaxHealth, hitWhy(), extra))
+                local why = hitWhy()
+                log(string.format("HIT -%.0f hp %.0f/%.0f | %s%s", last - v, v, h.MaxHealth, why, extra))
+                if why:find("in zone: none", 1, true) and (last - v) > h.MaxHealth * 0.2 then
+                    pcall(function() log("HITSRC new in the last 4 s: " .. hitSources()) end)
+                    pcall(function() log("ZONEMISS " .. nearZones()) end)
+                end
                 -- the spot we fought the boss from just got hit: count it and pick another one now
                 if S.bossCell and os.clock() - S.bossCell.t < 2 then
                     local c = S.bossCell.stat
@@ -1886,7 +2450,11 @@ local function ddNow() local p = LP:FindFirstChild("dungPerformance") local v = 
 --------------------------------------------------------------------------------
 -- capped at 24 after the #101 kick (we hovered +36 over Addonis just before it)
 local HEIGHT_MAX = 24
-local function heightFor(name) return math.min(HEIGHT_MAX, tonumber(cfg.mobHeight[name]) or 20) end
+local HEIGHT_MIN = 16
+local function heightFor(name, m)
+    if m then return S.hoverFor(m) end -- dq_164: tall bosses hover higher (see S.hoverFor)
+    return math.max(HEIGHT_MIN, math.min(HEIGHT_MAX, tonumber(cfg.mobHeight[name]) or 20))
+end
 local HT = {}
 local function heightTick(e)
     local now, name = os.clock(), e.m.Name
@@ -1899,8 +2467,9 @@ local function heightTick(e)
             cfg.mobHeight[name] = h + 3 HT.okSince = now
             log(string.format("HEIGHT %s -> %d (hitting fine, trying higher)", name, h + 3))
         end
-    elseif swingOn and h > 6 then
-        cfg.mobHeight[name] = math.max(6, h - 4) HT.okSince = nil
+    elseif swingOn and h > HEIGHT_MIN then
+        -- 11-23 owner: stay high over their heads (Archangels learned 8-12 and killed us there); never under HEIGHT_MIN
+        cfg.mobHeight[name] = math.max(HEIGHT_MIN, h - 4) HT.okSince = nil
         log(string.format("HEIGHT %s -> %d (no damage at %d)", name, cfg.mobHeight[name], h))
     end
     HT.t0, HT.dd0 = now, ddNow()
@@ -1931,7 +2500,7 @@ local function cellPos(root, ai, ri, hi)
     look = look.Unit
     local a = (ai - 1) * math.pi / 4
     local dir = Vector3.new(look.X * math.cos(a) - look.Z * math.sin(a), 0, look.X * math.sin(a) + look.Z * math.cos(a))
-    return root.Position + dir * CELL_R[ri] + Vector3.new(0, heightFor(root.Parent and root.Parent.Name or "?"), 0)
+    return root.Position + dir * CELL_R[ri] + Vector3.new(0, heightFor(root.Parent and root.Parent.Name or "?", root.Parent), 0)
 end
 -- 11-22 Forsaken Limbo: Destined Death's Ring (44x64) + Line zones show ~3 s before the damage. Light mode dodged
 -- out, but the boss spot / stand spot only checked zones in Full mode, so the next tick put us straight back in
@@ -1991,7 +2560,7 @@ local function bossSpot(e)
             if not best then
                 local key = ai .. "_" .. ri .. "_1"
                 local q = liftOver(cellPos(e.r, ai, ri, 1), function(x) return hotAt(x) end)
-                if q and (q - e.r.Position).Magnitude < 40 then
+                if q and S.reachOK(q, e.r) then -- dq_179: reach check (was 3D < 62); dq_164: 40 -> 62, Q / E reach that far (the flower sits on the floor: 51 under the lifted spot)
                     stats[key] = stats[key] or { s = 0, h = 0 }
                     best = { ai = ai, ri = ri, hi = 1, key = key, stat = stats[key], lift = q }
                 end
@@ -2040,8 +2609,14 @@ local function engage(e)
     do
         local now = os.clock()
         S.decoy = S.decoy or {}
+        -- dq_164: the Lifeless Flower (lvl 275) must die inside its 20 s or both bosses heal to full - never skip it.
+        -- Out of swing reach (hovering over a zone) only Q / E hit, every 5.9 s: 2.5 s without damage means nothing there.
+        local keep = e.m.Name:lower():find("flower") ~= nil
+        local hbx = e.m:FindFirstChild("Hitbox")
+        local far = hbx and hbx:IsA("BasePart") and (r.Position.Y - (hbx.Position.Y + hbx.Size.Y / 2)) > 13
         if S.dTarget ~= e.m then S.dTarget, S.dT0, S.dHp = e.m, now, e.h.Health
-        elseif swingOn and now - S.dT0 > 2.5 then -- 11-21 owner: 6 s was slow to leave an immune boss
+        elseif keep then S.dT0, S.dHp = now, e.h.Health
+        elseif swingOn and now - S.dT0 > (far and 7 or 2.5) then -- 11-21 owner: 6 s was slow to leave an immune boss
             -- 11-21 lvl 100 Haste Tower: 80 s on it, 73M -> 68.9M (others alive); "hardly drops" counts as immune too:
             -- under 0.2% of max hp in 2.5 s of swinging (tower: 0.07%; a 320M boss solo still loses ~0.5%)
             if S.dHp - e.h.Health < e.h.MaxHealth * 0.002 then
@@ -2068,9 +2643,7 @@ local function engage(e)
         curTarget = e.r
         swingOn = (r.Position - e.r.Position).Magnitude < 30
         if swingOn and cfg.autoQE then
-            if castReady("Q") then cast("Q") end
-            if castReady("E") then cast("E") end
-            if castReady("R") then cast("R") end
+            -- (dq_167: Q / E / R are cast by the autocast loop)
         trySwap()
         end
         S.target = "in the safe zone"
@@ -2080,15 +2653,25 @@ local function engage(e)
     if e.h.MaxHealth >= 8000 and cfg.move ~= "Walk" then
         curTarget = e.r
         local p = bossSpot(e)
+        if not p then p = S.edgeSpot(e.r.Position + Vector3.new(0, heightFor(e.m.Name, e.m), 0)) end -- dq_169
+        -- owner 11-23 lvl 260: "our skills are wide - just cast them": stand outside the mobs' reach (standOff studs) and
+        -- let Q/E/R do the damage. 0 = off (old spot in swing reach).
+        local so = tonumber(cfg.standOff) or 0
+        if p and so > 0 then
+            local dv = flat(p) - flat(e.r.Position)
+            if dv.Magnitude < 0.1 then dv = flat(r.Position) - flat(e.r.Position) end
+            if dv.Magnitude < 0.1 then dv = Vector3.new(0, 0, 1) end
+            local q = e.r.Position + dv.Unit * so + Vector3.new(0, heightFor(e.m.Name, e.m), 0)
+            if not hotAt(q) then p = q end
+        end
         if p then
             if (r.Position - p).Magnitude > 3 then moveTo(p, e.r.Position) end
             hold = { cf = CFrame.lookAt(p, e.r.Position), t = os.clock() }
-            swingOn = (p - e.r.Position).Magnitude < 40
-            heightTick(e)
+            swingOn = (p - e.r.Position).Magnitude < 40 + so
+            -- dq_164: over a zone we are out of swing reach on purpose - that must not teach the height learner "no damage"
+            if so <= 0 and not (S.bossCell and S.bossCell.lift) then heightTick(e) end
             if swingOn and cfg.autoQE then
-                if castReady("Q") then cast("Q") end
-                if castReady("E") then cast("E") end
-                if castReady("R") then cast("R") end
+                -- (dq_167: Q / E / R are cast by the autocast loop)
         trySwap()
             end
             return
@@ -2115,13 +2698,15 @@ local function engage(e)
     local dir = flat(r.Position) - flat(tp)
     if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, 1) end
     -- hover > 0 = hover on; how high is learned per mob (heightFor)
-    local hover = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and heightFor(e.m.Name) or 0
+    local hover = (cfg.move ~= "Walk") and (tonumber(cfg.hover) or 0) > 0 and heightFor(e.m.Name, e.m) or 0
     local stand
     if hover > 0 then
         -- just behind the mob's centre and above its head; the swing hitbox (16 x 50 x 22) reaches down
         stand = tp + dir.Unit * 2 + Vector3.new(0, hover, 0)
         local sec = mySector()
         if sec then stand = tp + sec * 4 + Vector3.new(0, hover, 0) end
+        local so = tonumber(cfg.standOff) or 0
+        if so > 0 then stand = tp + dir.Unit * so + Vector3.new(0, hover, 0) end
         -- another player (bot) already over this mob: take the other side, further out
         if crowded(stand) then
             for _, deg in ipairs({ 180, 90, 270, 45, 135, 225, 315 }) do
@@ -2137,6 +2722,7 @@ local function engage(e)
         stand = Vector3.new(stand.X, tp.Y, stand.Z)
     end
     curTarget = e.r
+    stand = S.edgeSpot(stand) or stand -- dq_169: never inside a carry trigger's keep-out zone
     -- the usual spot is in a red zone: take a clear spot beside the mob (on the ground) and keep hitting
     local side = false
     if hotAt(stand) then
@@ -2170,15 +2756,75 @@ local function engage(e)
         setCF(faceCF(r.Position, tp))
     end
     local d = r and (flat(r.Position) - flat(tp)).Magnitude or 99
-    swingOn = d < 14
-    if hover > 0 then heightTick(e) end
+    local so2 = tonumber(cfg.standOff) or 0
+    swingOn = d < 14 + so2
+    if hover > 0 and so2 <= 0 then heightTick(e) end
     if swingOn and cfg.autoQE then
-        if castReady("Q") then cast("Q") end
-        if castReady("E") then cast("E") end
-        if castReady("R") then cast("R") end
+        -- (dq_167: Q / E / R are cast by the autocast loop)
         trySwap()
     end
 end
+
+-- dq_164: Q / E / R whenever they are ready and a mob is in their reach - also while we dodge, move or hover over a
+-- zone. Measured lvl 275 (dq/dmg.txt 11-24): one Q+E cast = 578T on every mob within 60-85 studs = 64 % of all boss
+-- damage, cooldown 5.9 s, but the casts came 6-10 s apart because they only ran inside engage() with swingOn.
+-- Also logs the flower mechanic (appears -> killed / ran out) so each run shows whether the bosses were healed.
+go("autocast", function()
+    -- dev PC only: dq/autorun.lua (study recorders) runs once per dungeon, so a study needs no rebuild
+    if DEV and not IN_LOBBY then pcall(function() if isfile(DIR .. "/autorun.lua") then local f = loadstring(readfile(DIR .. "/autorun.lua")) if f then log("AUTORUN " .. tostring(f())) end end end) end
+    local fl = nil -- {m, t0, hp}
+    local rayT, rayN = os.clock(), 0
+    while F.alive do
+        task.wait(0.1)
+        if os.clock() - rayT > 30 then
+            local n = (S.exactRays or 0) - rayN
+            if n > 0 and not IN_LOBBY then log(string.format("EXACT %d shape rays in 30 s (%.0f a second)", n, n / 30)) end
+            rayT, rayN = os.clock(), S.exactRays or 0
+            if S.dodgeBy and next(S.dodgeBy) then
+                local t = {}
+                for k, v in pairs(S.dodgeBy) do t[#t + 1] = { k = k, v = v } end
+                table.sort(t, function(a, b) return a.v > b.v end)
+                local o = {}
+                for i = 1, math.min(6, #t) do o[#o + 1] = t[i].k .. " " .. t[i].v end
+                log("DODGE CAUSES last 30 s: " .. table.concat(o, ", "))
+                S.dodgeBy = {}
+            end
+        end
+        if cfg.farm and not IN_LOBBY and not S.limitBusy then
+            local r, h = hrp(), hum()
+            local list = enemies()
+            if r and h and h.Health > 0 and cfg.autoQE then
+                local near = curTarget and curTarget.Parent and (curTarget.Position - r.Position).Magnitude < 62
+                if not near then
+                    for _, e in ipairs(list) do if (e.r.Position - r.Position).Magnitude < 55 then near = true break end end
+                end
+                if near then
+                    -- dev study hook: getgenv().DQ_STAGGER = seconds to hold E after Q, so the damage of each spell
+                    -- shows on its own in dq/dmg.txt
+                    local stag = DEV and getgenv and tonumber(getgenv().DQ_STAGGER)
+                    if castReady("Q") then cast("Q") S.lastQ = os.clock() end
+                    if castReady("E") and (not stag or os.clock() - (S.lastQ or 0) > stag) then cast("E") end
+                    if castReady("R") then cast("R") end
+                end
+            end
+            local seen = nil
+            for _, e in ipairs(list) do if e.m.Name:lower():find("flower") then seen = e break end end
+            if seen and not (fl and fl.m == seen.m) then
+                fl = { m = seen.m, t0 = os.clock(), hp = seen.h.Health }
+                S.flowers = (S.flowers or 0) + 1
+                log(string.format("FLOWER %d up (%.0fT) - 20 s to kill it or the bosses heal to full", S.flowers, seen.h.Health / 1e12))
+            elseif seen and fl then
+                fl.hp = seen.h.Health
+            elseif fl and not seen then
+                local life = os.clock() - fl.t0
+                local killed = fl.hp < 2e14 or life < 20.8
+                if killed then S.flowerKills = (S.flowerKills or 0) + 1 end
+                log(string.format("FLOWER %d %s after %.1f s (last seen %.0fT) - killed %d of %d", S.flowers or 0, killed and "KILLED" or "RAN OUT -> bosses healed", life, fl.hp / 1e12, S.flowerKills or 0, S.flowers or 0))
+                fl = nil
+            end
+        end
+    end
+end)
 
 --------------------------------------------------------------------------------
 -- run bookkeeping
@@ -2684,6 +3330,15 @@ local function playing(manual)
     while idx > 1 and S.refused[cfg.map .. "|" .. DIFFS[idx]] do idx = idx - 1 end
     return cfg.map, DIFFS[idx]
 end
+-- 11-23 18:25 kicked "idle 20 minutes" while waiting in the lobby with Auto join off: answer the idle signal
+-- with one virtual click (the usual anti-AFK), so a paused hub never gets the account kicked.
+pcall(function()
+    local vu = game:GetService("VirtualUser")
+    F.conns[#F.conns + 1] = LP.Idled:Connect(function()
+        pcall(function() vu:CaptureController() vu:ClickButton2(Vector2.new()) end)
+        log("IDLE signal - sent one click so Roblox does not kick for idling")
+    end)
+end)
 S.runKey = runKey
 -- 11-23 First Sanctuary: the game sent us to the lobby twice mid-run (9.5 and 13 min in, no fail screen).
 -- Log the dungeon room counters whenever they change, to see whether a timer or a lives count ends the run.
@@ -2698,7 +3353,7 @@ if not IN_LOBBY then go("roominfo", function()
             end
             local cur = table.concat(t, " ")
             local tl = ri:FindFirstChild("timeLeft")
-            local key = cur:gsub("timeLeft=%d+", "") -- log a timer tick only every 60 s
+            local key = cur:gsub("timeLeft=%-?%d+", "") -- log a timer tick only every 60 s
             local tv = tl and tonumber(tl.Value)
             if key ~= last or (tv and tv ~= lastT and tv % 60 == 0) then log("ROOMINFO " .. cur) last = key end
             lastT = tv
@@ -3017,6 +3672,9 @@ local function lobbyTick()
     -- ignored every PlaySolo above Raided Village (all refused since 11-22 14:53)
     local need = 1
     for _, m in ipairs(MAP_REQ) do if m.map == map and m.req[diff] then need = m.req[diff] end end
+    -- dq_163: raids / tower / boss rush are not in MAP_REQ (Elemental Raids Fourteen sent 1 and was refused 4 times, 11-24);
+    -- the game button reads DungeonInfo.dungeonInfo[Map].DifficultyReqs[Difficulty] for every mode - same here
+    pcall(function() local r = require(RS.Modules.DungeonInfo).dungeonInfo[map].DifficultyReqs[diff] if tonumber(r) then need = tonumber(r) end end)
     local t = { Map = map, Calamity = false, Hardcore = hc, NoHit = false,
         Difficulty = diff, LevelRequirement = need, Tier = 1, Private = false, Easter = false }
     log("PlaySolo " .. map .. " " .. diff .. (hc and " hardcore" or "") .. " (try " .. S.tries[key] .. ")")
@@ -3361,10 +4019,15 @@ local function runCmd(line)
     log("CMD " .. line)
     if a == "farm" then cfg.farm = (b == "1" or b == "on") saveCfg()
     elseif a == "limit" then go("limit", runLimit, b ~= "" and b or "all")
+    elseif a == "set" and b == "modeTier" then -- dq_163: tier of the current mode (Elemental Raids Fourteen = lvl 275)
+        if type(cfg.modeTier) ~= "table" then cfg.modeTier = {} end
+        cfg.modeTier[cfg.mode or "Dungeons"] = c saveCfg()
     elseif a == "set" and DEFAULT[b] ~= nil then
         local v = c
         if type(DEFAULT[b]) == "number" then v = tonumber(c) or DEFAULT[b] elseif type(DEFAULT[b]) == "boolean" then v = (c == "true" or c == "1") end
-        cfg[b] = v saveCfg()
+        cfg[b] = v
+        if b == "dodge" then cfg.dodgeOn = v cfg.dodgeMode = "Full" cfg.dodgeLight = false end -- dq_161: one command turns Full dodge on/off
+        saveCfg()
     elseif a == "return" then local rl = R("ReturnLobby") if rl then rl:FireServer() end
     elseif a == "lobby" then toLobby()
     elseif a == "jobs" then go("jobs", lobbyJobs)
